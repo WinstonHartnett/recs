@@ -1,12 +1,13 @@
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE FunctionalDependencies #-}
 
-module Recs ( someFunc ) where
+module Recs where
 
 import Control.Lens
 import Control.Monad ( unless, when )
 import Control.Monad.Reader ( ReaderT (runReaderT), ask, lift, MonadIO (liftIO), MonadReader, MonadTrans )
 import Control.Monad.State ( StateT )
-import Data.Data ( Proxy )
+import Data.Data ( Proxy (Proxy) )
 import Data.Default ( Default(def) )
 import Data.Generics.Labels ()
 import qualified Data.HashMap.Strict as HM
@@ -26,11 +27,7 @@ import Unsafe.Coerce ( unsafeCoerce )
 import Witch ()
 import Control.Monad.Primitive (PrimMonad (PrimState, primitive), PrimBase, MonadPrim)
 import Control.Monad.Catch (MonadThrow, MonadMask, MonadCatch)
-
-type MappedU c = VR.GrowableUnboxedIOVector c
-type Mapped c = VR.GrowableIOVector c
-type Global c = P.MutVar RealWorld c
-type Tagged c = ()
+import Data.IORef (IORef)
 
 --------------------------------------------------------------------------------
 -- Utilities
@@ -106,7 +103,6 @@ derivingUnbox "Edge" [t| Edge -> ( Int, Int ) |]
 
 class Component c where
     type Storage c
-
     typeId :: Proxy c -> TypeId
 
 data Arch
@@ -121,8 +117,6 @@ data Arch
           types :: {-# UNPACK #-} !TypeId,
           -- | Edges used to traverse the archetype graph. There is one edge per type
           --   in the ECS.
-          --
-          --   TODO Make this mutable?
           edges :: VUM.IOVector Edge }
     deriving Generic
 
@@ -162,6 +156,8 @@ instance Default (IO Ecs) where
 newtype SystemT m a = MkSystemT { unSystemT :: ReaderT Ecs m a }
   deriving (Functor, Applicative, Monad, MonadReader Ecs, MonadIO, MonadTrans, MonadThrow, MonadCatch, MonadMask)
 
+type System a = SystemT IO a
+
 runSystemT :: SystemT m a -> Ecs -> m a
 runSystemT = runReaderT . unSystemT
 
@@ -175,7 +171,7 @@ instance PrimMonad m => PrimMonad (SystemT m) where
 data ArchSearch = AddType | SubType
     deriving ( Generic, Show )
 
-traverseArch :: Arch -> TypeId -> ArchSearch -> SystemT IO Arch
+traverseArch :: Arch -> TypeId -> ArchSearch -> System Arch
 traverseArch root tId@(MkTypeId t) search = do
     ecs <- ask
     let archetypes = ecs ^. #archetypes
@@ -195,83 +191,135 @@ traverseArch root tId@(MkTypeId t) search = do
             Nothing -> pure root'
     loop t root
 
--- test :: SystemT (StateT Int IO) Arch
--- test = traverseArch undefined undefined undefined
+traverseRoot :: TypeId -> System Arch
+traverseRoot tId = do
+    ecs <- ask
+    root <- (ecs ^. #archetypes) `VR.read` 0
+    traverseArch root tId AddType
 
--- traverseRoot :: TypeId -> System Arch
--- traverseRoot tId = do
---     ecs <- ask
---     root <- (ecs ^. #archetypes) `VR.read` 0
---     traverseArch root tId AddType
+createArch :: TypeId -> System Arch
+createArch tId@(MkTypeId t) = do
+    ecs <- ask
+    newArchId <- MkArchId <$> VR.length (ecs ^. #archetypes)
+    newArch <- MkArch (VG.generate (VG.length t) (const undefined)) <$> VR.new
+        <*> pure tId
+        <*> (P.readMutVar (ecs ^. #registry) >>= VUM.new . view #ct)
+    (ecs ^. #archetypes) `VR.push` newArch
+    (ecs ^. #generations) `VR.read` VG.length t >>= (`VR.push` newArchId) -- Add to generation list
+    -- Update incoming & outgoing edges for previous-generation archetypes,
+    -- this archetype, and next-generation archetypes.
+    populateEdges ( newArchId, newArch )
+    pure newArch
 
--- createArch :: TypeId -> System Arch
--- createArch tId@(MkTypeId t) = do
---     ecs <- ask
---     newArchId <- MkArchId <$> VR.length (ecs ^. #archetypes)
---     newArch <- MkArch (VG.generate (VG.length t) (const undefined)) <$> VR.new
---         <*> pure tId
---         <*> (P.readMutVar (ecs ^. #registry) >>= VUM.new . view #ct)
---     (ecs ^. #archetypes) `VR.push` newArch
---     (ecs ^. #generations) `VR.read` VG.length t >>= (`VR.push` newArchId) -- Add to generation list
---     -- Update incoming & outgoing edges for previous-generation archetypes,
---     -- this archetype, and next-generation archetypes.
---     populateEdges ( newArchId, newArch )
---     pure newArch
+populateEdges :: ( ArchId, Arch ) -> System ()
+populateEdges ( archId, arch ) = do
+    ecs <- ask
+    genCount <- VR.length (ecs ^. #generations)
+    let thisGen = VG.length . unTypeId $ arch ^. #types
+        nextGen = thisGen + 1
+        prevGen = thisGen - 1
+        getGeneration gen = (ecs ^. #generations) `VR.read` gen >>= VR.freeze
+            >>= VG.mapM (over (mapped . _1) MkArchId . traverseOf _2
+                         (((ecs ^. #archetypes) `VR.read`) . unArchId))
+            . VG.indexed . (VG.convert @_ @_ @V.Vector)
+    nextArches <- if nextGen >= genCount then pure [] else getGeneration nextGen
+    prevArches <- getGeneration prevGen
+    -- | Write new edge information
+    --   'thisDirection' is the edge direction to modify for 'arch'.
+    --   'direction' is the edge direction to modify for either a previous- or next-gen
+    --   archetype.
+    let write direction thisDirection ( archId', arch' ) = do
+            let diff = VG.head . unTypeId $ (arch' ^. #types)
+                    `typeIdDiff` (arch ^. #types)
+            VUM.modify (arch' ^. #edges) (set direction (Just archId)) diff
+            VUM.modify (arch ^. #edges) (set thisDirection (Just archId')) diff
+    unless (nextGen >= genCount) (VG.forM_ nextArches (write #remove #add))
+    VG.forM_ prevArches (write #add #remove)
 
--- populateEdges :: ( ArchId, Arch ) -> System ()
--- populateEdges ( archId, arch ) = do
---     ecs <- ask
---     genCount <- VR.length (ecs ^. #generations)
---     let thisGen = VG.length . unTypeId $ arch ^. #types
---         nextGen = thisGen + 1
---         prevGen = thisGen - 1
---         getGeneration gen = (ecs ^. #generations) `VR.read` gen >>= VR.freeze
---             >>= VG.mapM (over (mapped . _1) MkArchId . traverseOf _2
---                          (((ecs ^. #archetypes) `VR.read`) . unArchId))
---             . VG.indexed . (VG.convert @_ @_ @V.Vector)
---     nextArches <- if nextGen >= genCount then pure [] else getGeneration nextGen
---     prevArches <- getGeneration prevGen
---     -- | Write new edge information
---     --   'thisDirection' is the edge direction to modify for 'arch'.
---     --   'direction' is the edge direction to modify for either a previous- or next-gen
---     --   archetype.
---     let write direction thisDirection ( archId', arch' ) = do
---             let diff = VG.head . unTypeId $ (arch' ^. #types)
---                     `typeIdDiff` (arch ^. #types)
---             VUM.modify (arch' ^. #edges) (set direction (Just archId)) diff
---             VUM.modify (arch ^. #edges) (set thisDirection (Just archId')) diff
---     unless (nextGen >= genCount) (VG.forM_ nextArches (write #remove #add))
---     VG.forM_ prevArches (write #add #remove)
+--------------------------------------------------------------------------------
+-- Stores
+--------------------------------------------------------------------------------
 
--- --------------------------------------------------------------------------------
--- -- Component Management
--- --------------------------------------------------------------------------------
+newtype UMap c = MkUMap (VR.GrowableUnboxedIOVector c)
+newtype BMap c = MkBMap (VR.GrowableIOVector c)
+newtype Global c = MkGlobal (IORef c)
+data Tagged c = MkTagged
 
--- class Component c => Get m c where
---   exists :: Proxy c -> EntityId -> SystemT Ecs m Bool
---   get :: EntityId -> SystemT Ecs m c
+class ConvertTuple a where
+  unsafeConvertTuple :: V.Vector Any -> a
 
--- class Component c => Set m c where
---   set' :: c -> EntityId -> SystemT Ecs m ()
+instance ConvertTuple a where
+  unsafeConvertTuple [x] = unsafeCoerce x
 
--- class Component c => Destroy m c where
---   destroy :: Proxy c -> EntityId -> SystemT Ecs m ()
+instance ConvertTuple (a, b) where
+  unsafeConvertTuple [x, y] = (unsafeCoerce x, unsafeCoerce y)
 
--- class Component c => Members m c where
---   members :: Proxy c -> SystemT w m (VU.Vector EntityId)
+instance ConvertTuple (a, b, c) where
+  unsafeConvertTuple [x, y, z] = (unsafeCoerce x, unsafeCoerce y, unsafeCoerce z)
 
--- -- Tuple instances
+componentExists :: forall k c. Component c => Proxy c -> EntityId -> SystemT IO Bool
+componentExists p eId = do
+  archRec <- getRecord eId
+  case archRec of
+    Just archRec' -> do
+      targetArch <- followRecord archRec'
+      let tId = typeId p
+          isSubset = tId `typeIdSubset` (targetArch ^. #types)
+      row <- (targetArch ^. #entities) `VR.read` (archRec' ^. #row)
+      pure $ row /= MkEntityId (-1) && isSubset
+    Nothing -> pure False
 
--- instance (Component a, Component b) => Component (a, b)
+componentGet :: forall c. (Component c, ConvertTuple (Storage c)) => EntityId -> SystemT IO c
+componentGet eId = do
+  targetArch <- fromJust <$> followEntityId eId
+  let tId = typeId $ Proxy @c
+      targetVec = VG.backpermute (targetArch ^. #components) (VG.convert . unTypeId $ tId)
+      converted = unsafeConvertTuple @(Storage c) targetVec
 
--- instance (Component (a, b), Get m a, Get m b, Monad m) => Get m (a, b) where
---   exists p eId = do
---     let tId = typeId p
---     targetArch <- traverseRoot tId
---     undefined
+  undefined
 
+instance (Component a, Component b) => Component (a, b) where
+  type Storage (a, b) = (Storage a, Storage b)
 
+class Store s where
+  type Elem s
 
+--------------------------------------------------------------------------------
+-- Component Management
+--
+-- These methods are NOT checked for race conditions. Do not use them in
+-- systems!
+--------------------------------------------------------------------------------
+class Component c => Get m c where
+  -- | Whether a given entity exists in a store somewhere.
+  exists :: Proxy c -> EntityId -> SystemT m Bool
+  -- | Get an entity by its unique ID.
+  entity :: EntityId -> SystemT m c
+
+class Component c => Set m c where
+  set' :: c -> EntityId -> SystemT m ()
+
+class Component c => Destroy m c where
+  destroy :: Proxy c -> EntityId -> SystemT m ()
+
+class Component c => Members m c where
+  members :: Proxy c -> SystemT m (VU.Vector EntityId)
+
+--------------------------------------------------------------------------------
+-- Entity Management
+--------------------------------------------------------------------------------
+
+getRecord :: EntityId -> System (Maybe ArchRecord)
+getRecord eId = do
+  ecs <- ask
+  P.readMutVar (ecs ^. #registry) <&> IM.lookup (unEntityId eId) . view #entityIndex
+
+-- | Locate the archetype that holds this Entity ID.
+followRecord :: ArchRecord -> System Arch
+followRecord record = ask >>= \ecs -> (ecs ^. #archetypes) `VR.read` unArchId (record ^. #archId)
+
+followEntityId :: EntityId -> System (Maybe Arch)
+followEntityId eId = getRecord eId >>= traverse followRecord
 
 someFunc :: IO ()
 someFunc = putStrLn "someFunc"
