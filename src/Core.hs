@@ -1,11 +1,13 @@
 module Core where
 
+import           Control.Lens                 hiding (index)
 import           Control.Monad.Catch          (MonadCatch,MonadMask,MonadThrow)
 import           Control.Monad.Primitive      (PrimMonad(primitive),PrimState)
 import           Control.Monad.Reader
      (MonadIO,MonadReader(ask),MonadTrans(lift),ReaderT)
 
 import           Data.Bifunctor               (bimap)
+import           Data.Generics.Labels
 import qualified Data.IntMap                  as IM
 import qualified Data.IntSet                  as IS
 import qualified Data.Primitive               as P
@@ -16,11 +18,10 @@ import qualified Data.Vector.Growable         as VR
 import qualified Data.Vector.Unboxed          as VU
 import           Data.Vector.Unboxed.Deriving
 import qualified Data.Vector.Unboxed.Mutable  as VUM
-import Data.Generics.Labels
-import Control.Lens
 
 import           GHC.Base                     (Any,RealWorld)
 import           GHC.Generics                 (Generic)
+import Control.Applicative (liftA2, liftA3)
 
 newtype TypeId =
   MkTypeId
@@ -46,8 +47,7 @@ newtype EntityId =
   }
   deriving Generic
 
-derivingUnbox "EntityId" [t| EntityId -> Int |] [| \(MkEntityId x) -> x |]
-  [| MkEntityId |]
+derivingUnbox "EntityId" [t|EntityId -> Int|] [|\(MkEntityId x) -> x|] [|MkEntityId|]
 
 newtype ArchId =
   MkArchId
@@ -55,8 +55,7 @@ newtype ArchId =
   }
   deriving (Generic,Show,Eq)
 
-derivingUnbox "MkArchId" [t| ArchId -> Int |] [| \(MkArchId x) -> x |]
-  [| MkArchId |]
+derivingUnbox "MkArchId" [t|ArchId -> Int|] [|\(MkArchId x) -> x|] [|MkArchId|]
 
 data Edge =
   MkEdge
@@ -67,12 +66,13 @@ data Edge =
 
 unsafeMkArchId :: Int -> Maybe ArchId
 unsafeMkArchId x
-    | x < 0 = Nothing
-    | otherwise = Just . MkArchId $ x
+  | x < 0 = Nothing
+  | otherwise = Just . MkArchId $ x
 
-derivingUnbox "Edge" [t| Edge -> ( Int, Int ) |]
-  [| \(MkEdge a r) -> ( maybe (-1) unArchId a, maybe (-1) unArchId r ) |]
-  [| \x -> let ( a, r ) = bimap unsafeMkArchId unsafeMkArchId x in MkEdge a r |]
+derivingUnbox "Edge" [t|Edge -> (Int, Int)|] [|\(MkEdge a r)
+  -> (maybe (-1) unArchId a, maybe (-1) unArchId r)|] [|\x
+  -> let (a, r) = bimap unsafeMkArchId unsafeMkArchId x
+     in MkEdge a r|]
 
 data Arch =
   MkArch
@@ -144,8 +144,8 @@ class Exists st m c where
 class Destroy m s where
   destroy :: s -> EntityId -> EcsT m ()
 
-class Members m s where
-  members :: s -> EcsT m (VU.Vector EntityId)
+class Members st m s where
+  members :: Proxy st -> s -> EcsT m (VU.Vector EntityId)
 
 getRecord :: EntityId -> EcsT IO (Maybe ArchRecord)
 getRecord eId = do
@@ -154,7 +154,32 @@ getRecord eId = do
 
 -- | Locate the archetype that holds this Entity ID.
 followRecord :: ArchRecord -> EcsT IO Arch
-followRecord record = ask >>= \ecs -> (ecs ^. #archetypes) `VR.read` unArchId (record ^. #archId)
+followRecord record = ask >>= \ecs -> (ecs ^. #archetypes)
+  `VR.read` unArchId (record ^. #archId)
 
 followEntityId :: EntityId -> EcsT IO (Maybe Arch)
 followEntityId eId = getRecord eId >>= traverse followRecord
+
+-------------------------------------------------------------------------------
+-- Get instances
+-------------------------------------------------------------------------------
+
+type instance Elem (a, b) = (Elem a, Elem b)
+
+instance (Monad m, Get m a, Get m b) => Get m (a, b) where
+  index (a, b) eId = liftA2 (,) (index a eId) (index b eId)
+
+type instance Elem (a, b, c) = (Elem a, Elem b, Elem c)
+
+instance (Monad m, Get m a, Get m b, Get m c) => Get m (a, b, c) where
+  index (a, b, c) eId = liftA3 (,,) (index a eId) (index b eId) (index c eId)
+
+type instance Elem (a, b, c, d) = (Elem a, Elem b, Elem c, Elem d)
+
+instance (Monad m, Get m a, Get m b, Get m c, Get m d) => Get m (a, b, c, d) where
+  index (a, b, c, d) eId = do
+    a' <- index a eId
+    b' <- index b eId
+    c' <- index c eId
+    d' <- index d eId
+    pure (a', b', c', d')
