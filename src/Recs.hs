@@ -281,20 +281,21 @@ componentGet eId = do
 instance (Component a, Component b) => Component (a, b) where
   type Storage (a, b) = (Storage a, Storage b)
 
-class Store s where
-  type Elem s
-
 --------------------------------------------------------------------------------
 -- Component Management
 --
 -- These methods are NOT checked for race conditions. Do not use them in
 -- systems!
 --------------------------------------------------------------------------------
-class Component c => Get m c where
+class Component c => Get s m c where
   -- | Whether a given entity exists in a store somewhere.
-  exists :: Proxy c -> EntityId -> SystemT m Bool
-  -- | Get an entity by its unique ID.
-  entity :: EntityId -> SystemT m c
+  exists :: s -> Proxy c -> EntityId -> SystemT m Bool
+  -- | Get an entity by its archetypal index.
+  entity :: s -> Int -> SystemT m c
+
+instance Component c => Get (UMap c) m c where
+
+instance Component c => Get (BMap c) m c where
 
 class Component c => Set m c where
   set' :: c -> EntityId -> SystemT m ()

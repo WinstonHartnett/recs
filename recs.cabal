@@ -31,6 +31,8 @@ library
       Target
       Access
       Core
+      Stores
+      Graph
 
     -- LANGUAGE extensions used by modules in this package.
     -- Uses GHC2021 list
