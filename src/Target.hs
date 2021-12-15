@@ -5,10 +5,11 @@
 
 module Target where
 
-import           Control.Monad.Reader (MonadReader,MonadTrans,ReaderT)
-import           Control.Monad.Writer (MonadWriter,WriterT)
+import           Control.Monad.Reader (MonadReader(ask),MonadTrans,ReaderT, lift)
+import           Control.Monad.Writer (MonadWriter,WriterT, MonadIO)
 import Control.Monad (when)
 import Control.Applicative (liftA2, liftA3)
+import Control.Arrow
 
 import Control.Lens hiding (index)
 
@@ -32,6 +33,8 @@ import Unsafe.Coerce (unsafeCoerce)
 import Control.Monad.State (MonadState, modify)
 import Control.Monad.State.Lazy (StateT)
 import Data.Coerce (coerce)
+
+-- import Fcf
 
 import qualified Data.Sequence as S
 
@@ -145,12 +148,30 @@ instance Monad m => Monoid (QueryContent m) where
 --   Use primitives like 'read', 'write', and 'optional' to filter archetypes.
 --   Use 'cancel' to cancel an entire system (see 'cancel' for caveats
 --   and safety properties).
+--
+--   TODO This is jank (come up w/ better querying primitives). Fix so you can:
+--
+--   @
+--       do
+--         read @(Position, Velocity)
+--         optional @Whatever
+--         write @Flying
+--         customQueryCached (do
+--           arch <- ask
+--           if VU.any (== 1) (arch ^. #types)
+--             then skip
+--             else pure ())
+--   @
 newtype Query x m a =
   MkQuery
-  { unQuery :: StateT (QueryContent m) m a
+  { unQuery :: StateT (QueryContent m) QueryIO a
   }
-  deriving (Generic,Applicative,Functor,Monad,MonadState (QueryContent m))
+  deriving (Generic,Applicative,Functor,Monad, MonadState (QueryContent m))
 
+newtype QueryIO a = MkQueryIO { runQueryIO :: IO a }
+  deriving (Applicative, Functor, Monad, MonadIO)
+
+-- TODO
 -- instance Alternative (Query x m a) where
 --   empty = MkQuery
 
@@ -164,16 +185,16 @@ data ArchTraversal = MkArchTraversal
   }
   deriving Generic
 
-newtype System x m a =
+newtype SystemT x m a =
   MkSystem
   { unSystem :: ReaderT ArchTraversal m a
   }
-  deriving (Generic,Applicative,Functor,Monad,MonadReader ArchTraversal)
+  deriving (Generic,Applicative,Functor,Monad,MonadReader ArchTraversal, MonadTrans)
 
 data Blueprint x m a =
   MkBlueprint
   { query  :: Query x m a
-  , system :: System x m a
+  , system :: SystemT x m a
   }
   deriving Generic
 
@@ -210,25 +231,6 @@ type family AssertIn c x :: Constraint where
   AssertIn '[] x = ()
   AssertIn (a ': as) x = (ElemOrError a x ~ 'True, AssertIn as x)
 
-type family MapGetA m x :: Constraint where
-  MapGetA m (i ': as) = (MapGetA2 (Layout (Storage i)) i,
-                         Get m (Storage i),
-                         Identify i,
-                         Component i,
-                         MapGetA m as)
-  MapGetA _ '[] = ()
-
-type family MapGetA2 l i where
-  MapGetA2 Archetypal i = GetA Archetypal i
-  MapGetA2 Flat i = GetA Flat i
-
--- type family MapGet m i x :: Constraint where
---   MapGet _ _ '[] = ()
---   MapGet m i
-
--- type family AssertIn c x :: Constraint where
---   AssertIn c x = AssertIn2 (UnTuple c) x
-
 type family MapTuple (f :: Type -> Constraint) l :: Constraint where
   MapTuple f (a ': as) = (f a, MapTuple f as)
   MapTuple _ '[] = ()
@@ -254,7 +256,7 @@ instance IdentifyFromList '[] where
   identifyFromList _ = []
 {-# SPECIALIZE identifyFromList :: Proxy '[] -> S.Seq Int #-}
 
-emap :: Query x m a -> System x m a -> Blueprint x m a
+emap :: Query x m a -> SystemT x m a -> Blueprint x m a
 emap = MkBlueprint
 
 -- | Read from archetypes with 'c'.
@@ -277,30 +279,33 @@ halt :: forall m x. Query x m ()
 halt = undefined
 
 -- | Construct a custom query, allowing unrestricted access to the 'Query'
---   state while querying. The query result is cached.
+--   state. The query result is cached.
 cachedCustomQuery :: forall m x a. Query x m a -> Query x m a
 cachedCustomQuery = undefined
 
--- | Construct a custom query that is cached after its first use.
---   See 'customQuery' for safety and caveats.
+-- | Construct a custom query, allowing unrestricted access to the 'Query'
+--   state. The query result is not cached. This can result in poor
+--   performance if the query is particularly expensive. Generally  prefer
+--   'cachedCustomQuery' over this.
 uncachedCustomQuery :: forall m x a. Query x m a -> Query x m a
 uncachedCustomQuery = undefined
 
-with :: forall c m a x t.
-  (t ~ UnTuple c,
-   AssertIn t (Fst x),
-   MapGetA m t,
-   Monad m)
-  => System x m c
-with = undefined
+type family CanLocate c where
+  CanLocate c = (Elem (PropStore c) ~ c, Locate c (IsTuple c))
 
-branch :: forall c m x t. (MapTuple Identify (UnTuple c), Monad m) => System x m ()
+type family Has c l :: Constraint where
+  Has c l = (AssertIn (UnTuple c) (Fst l), CanLocate c, Get IO (PropStore c))
+
+with :: forall c x. Has c x => SystemT x (EcsT IO) c
+with = ask >>= lift . locate @c @(IsTuple c) >>= lift . (`index` 0)
+
+branch :: forall c x. Has c x => SystemT x (EcsT IO) ()
 branch = undefined
 
-tag :: forall c m x t. (MapTuple Identify (UnTuple c), Monad m) => c -> System x m ()
+tag :: forall c m x t. (MapTuple Identify (UnTuple c), Monad m) => c -> SystemT x m ()
 tag = undefined
 
-untag :: forall c m x. (MapTuple Identify (UnTuple c), Monad m) => System x m ()
+untag :: forall c m x. (MapTuple Identify (UnTuple c), Monad m) => SystemT x m ()
 untag = undefined
 
 nothing :: Monad m => Query '( '[], '[] ) m a
@@ -315,12 +320,12 @@ nothing = undefined
 --         * determines access to components
 --   2. system: the behavior given those targets
 mySystem =
-  emap (read @(Position, Velocity) @IO -.- optional @Whatever -.- write @Flying)
-      (do MkVelocity v <- with
-          when (v >= 50) (branch @Whatever >> tag MkFlying))
+  emap (read @(Position, Velocity) -.- optional @Whatever -.- write @Flying)
+       (do MkVelocity v <- with
+           when (v >= 50) (branch @Whatever >> tag MkFlying))
 
 mySystem2 =
-  emap (optional @Whatever @IO -.- write @(Velocity, Flying, VelocityUpdated))
+  emap (optional @Whatever -.- write @(Velocity, Flying, VelocityUpdated))
        (do MkVelocity v <- with
            if v >= 50 then branch @(Whatever, VelocityUpdated)
                              >> tag MkFlying
@@ -328,12 +333,9 @@ mySystem2 =
                       else tag (MkVelocity $ v + 1.0))
 
 stepPosition =
-  emap (read @(Velocity, Time) @IO -.- write @Position)
-       (do
-         MkTime dT    <- with
-         MkPosition p <- with
-         MkVelocity v <- with
-         tag (MkPosition $ p + dT * v))
+  emap
+    (read @(Velocity, Time) -.- write @Position)
+    (with >>= \(MkTime dT, MkPosition p, MkVelocity v) -> tag (MkPosition $ p + dT * v))
 
 class Identify t where
   type Identified t :: Nat
@@ -342,50 +344,68 @@ class Identify t where
   {-# INLINE identify #-}
   identify _ = fromIntegral . natVal $ Proxy @(Identified t)
 
-class Component c => GetA st c where
-  getA :: Proxy st -> ArchTraversal -> EcsT IO c
-
-pullArchetype :: ArchTraversal -> Int -> Any
-pullArchetype trav tId =
-  let archIndex = (trav ^. #matched) VU.! tId
-    in (trav ^. #currArch . #components) V.! archIndex
-
-instance (Get IO (Storage a), Identify a, Component a) => GetA Archetypal a where
-  getA _ trav = do
-    let tId = identify $ Proxy @a
-        targetStore = unsafeCoerce @_ @(Storage a) $ pullArchetype trav tId
-    index targetStore (unEntityId $ trav ^. #currEntity)
-
-instance (Get IO (Storage a), Identify a, Component a) => GetA Flat a where
-  getA _ trav = do
-    let tId = identify $ Proxy @a
-    undefined
-
 type family PropStore s where
   PropStore (a, b, c) = (PropStore a, PropStore b, PropStore c)
   PropStore (a, b) = (PropStore a, PropStore b)
   PropStore a = Storage a
 
-class GetSA s where
-  getSA :: ArchTraversal -> EcsT IO (PropStore s)
+-- | 'Pull' specifies how to retrieve a single store during archetype iteration
+--    based on their 'Layout' type.
+--
+--    For example, 'Archetypal' layouts pull from the current archetype's
+--    stores, whereas 'Flat' layouts are pulled from global (i.e. not stored in
+--    in archetype graph) stores regardless of the current archetype.
+class (Identify c, Component c) => Pull layout c where
+  pull :: Proxy layout -> ArchTraversal -> EcsT IO (Storage c)
+{-# SPECIALIZE pull :: (Identify c, Component c) => Proxy Archetypal -> ArchTraversal -> EcsT IO (Storage c) #-}
+{-# SPECIALIZE pull :: (Identify c, Component c) => Proxy Flat -> ArchTraversal -> EcsT IO (Storage c) #-}
 
-instance (GetSA a, GetSA b) => GetSA (a, b) where
-  getSA trav = do
-    a <- getSA @a trav
-    b <- getSA @b trav
-    pure (a, b)
+instance (Identify c, Component c) => Pull Archetypal c where
+  pull _ trav =
+    let storeIdx = (trav ^. #matched) VU.! identify (Proxy @c)
+        pulled = (trav ^. #currArch . #components) V.! storeIdx
+      in pure . unsafeCoerce @_ @(Storage c) $ pulled
 
-instance (PropStore a ~ Storage a, Identify a, Component a) => GetSA a where
-  getSA trav = do
-    let aIdent = identify $ Proxy @a
-    pure $ unsafeCoerce @_ @(Storage a) $ pullArchetype trav aIdent
+instance (Identify c, Component c) => Pull Flat c where
+  -- pull _ _ = unsafeCoerce @_ @(Storage a) <$> pullFlat (identify $ Proxy @a)
+  pull _ _ = undefined
 
-with' :: forall a. (GetSA a, Get IO (PropStore a)) => ArchTraversal -> EcsT IO (Elem (PropStore a))
-with' trav = do
-  targetStore <- getSA @a trav
-  targetElem <- index targetStore 0
-  pure $ targetElem
+type family IsTuple t where
+  IsTuple (a, b, c) = 'True
+  IsTuple (a, b) = 'True
+  IsTuple a = 'False
 
+-- | 'Locate' is used to pull a store for each member of a tuple. For example:
+--
+--   @
+--      (a :: Storage Velocity, (b :: Storage Time, c :: Storage Whatever))
+--          <- locate @(Velocity, (Time, Whatever)) trav
+--   @
+--
+--   This is then passed to 'Get', after which we have our target components:
+--
+--   @
+--      (x :: (Storage Velocity, (Storage Time, Storage Whatever)))
+--          <- locate @(Velocity, (Time, Whatever)) trav
+--      (MkVelocity v, (MkTime t, MkWhatever)) <- index x (myEntityId)
+--   @
+--
+--   == Locate Signature
+--
+--   The 'it' type variable is a trick that helps GHC select the right instance
+--   based on whether 's' is a tuple. Otherwise, we'd have to use
+--   TypeApplications everywhere.
+class Locate s it where
+  locate :: ArchTraversal -> EcsT IO (PropStore s)
+
+instance (Locate a (IsTuple a), Locate b (IsTuple b)) => Locate (a, b) 'True where
+  locate trav = liftA2 (,) (locate @a @(IsTuple a) trav) (locate @b @(IsTuple b) trav)
+
+instance (Locate a (IsTuple a), Locate b (IsTuple b), Locate c (IsTuple c)) => Locate (a, b, c) 'True where
+  locate trav = liftA3 (,,) (locate @a @(IsTuple a) trav) (locate @b @(IsTuple b) trav) (locate @c @(IsTuple c) trav)
+
+instance (Storage c ~ PropStore c, Identify c, Component c, Pull (Layout (Storage c)) c) => Locate c 'False where
+  locate = pull (Proxy @(Layout (Storage c)))
 
 
 
