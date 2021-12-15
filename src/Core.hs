@@ -1,3 +1,6 @@
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE DataKinds #-}
+
 module Core where
 
 import           Control.Lens                 hiding (index)
@@ -22,6 +25,10 @@ import qualified Data.Vector.Unboxed.Mutable  as VUM
 import           GHC.Base                     (Any,RealWorld)
 import           GHC.Generics                 (Generic)
 import Control.Applicative (liftA2, liftA3)
+import GHC.TypeLits (Nat, KnownNat, natVal)
+import Data.Proxy (Proxy(..))
+import qualified Data.Sequence as S
+import Control.Monad.State (StateT, MonadState)
 
 newtype TypeId =
   MkTypeId
@@ -132,14 +139,25 @@ instance PrimMonad m => PrimMonad (EcsT m) where
 
   primitive = lift . primitive
 
+class Identify t where
+  type Identified t :: Nat
+  identify :: Proxy t -> Int
+  default identify :: (KnownNat (Identified t)) => Proxy t -> Int
+  {-# INLINE identify #-}
+  identify _ = fromIntegral . natVal $ Proxy @(Identified t)
+
+-------------------------------------------------------------------------------
+-- Store Management
+-------------------------------------------------------------------------------
+
 class Get m s where
   index :: s -> Int -> EcsT m (Elem s)
 
 class Set m s where
   set' :: s -> Elem s -> EntityId -> EcsT m ()
 
-class Exists st m c where
-  exists :: Proxy st -> Proxy c -> EntityId -> EcsT m Bool
+class Exists m c where
+  exists :: Proxy c -> EntityId -> EcsT m Bool
 
 class Destroy m s where
   destroy :: s -> EntityId -> EcsT m ()
@@ -160,10 +178,6 @@ followRecord record = ask >>= \ecs -> (ecs ^. #archetypes)
 followEntityId :: EntityId -> EcsT IO (Maybe Arch)
 followEntityId eId = getRecord eId >>= traverse followRecord
 
--------------------------------------------------------------------------------
--- Get instances
--------------------------------------------------------------------------------
-
 type instance Elem (a, b) = (Elem a, Elem b)
 
 instance (Monad m, Get m a, Get m b) => Get m (a, b) where
@@ -183,3 +197,118 @@ instance (Monad m, Get m a, Get m b, Get m c, Get m d) => Get m (a, b, c, d) whe
     c' <- index c eId
     d' <- index d eId
     pure (a', b', c', d')
+
+-------------------------------------------------------------------------------
+-- Archetype Traversal
+-------------------------------------------------------------------------------
+
+-- | 'QueryContent' stores the read and write accesses of a system along with a
+--   'valid' function that can be applied to an archetype to determine whether
+--   it is of interest to a system.
+--
+--   For example, this rudimentary query adds a check that this archetype does
+--   not contain a @Velocity@ store:
+--
+--   @
+--       let isNotVelocity =
+--             \a -> pure $ VG.any (== identify (Proxy @Velocity)) (a ^. #types)
+--       modify (over #valid (\v -> \a -> liftA2 (&&) (v a) (isNotVelocity a)))
+--   @
+--
+--   = Safety
+--
+--   You should generally use primitive query operators (like 'read' and 'write')
+--   instead of directly accessing archetypes. The above example can result in a
+--   race condition.
+data QueryContent m =
+  MkQueryContent
+  { -- | 'reads' is only used for system access control.
+    reads     :: S.Seq Int
+    -- | 'writes' is only used for system access control.
+  , writes    :: S.Seq Int
+    -- | When 'valid' returns @False@, the current archetype is skipped, and
+    --   traversal continues from the next in sequence. Note that you should
+    --   not ever mutate the ECS from within a query! This @m@ here should be
+    --   used wisely.
+  , valid     :: Arch -> m Bool
+  }
+  deriving Generic
+
+instance Monad m => Semigroup (QueryContent m) where
+  (MkQueryContent r w v) <> (MkQueryContent r' w' v') =
+    MkQueryContent (r <> r') (w <> w') (\a -> liftA2 (&&) (v a) (v' a))
+
+instance Monad m => Monoid (QueryContent m) where
+  mempty = MkQueryContent S.empty S.empty (const (pure True))
+
+-- | A 'Query' has two important jobs:
+--
+--   1. Track the components read and written to by a system.
+--   2. Determine if this system should run on an archetype, if at all.
+--
+--   == Access Control
+--
+--   A 'Query' has two levels of access control. Its type-level information
+--   is used for static verification (i.e. in the blueprint builder). It also
+--   stores the same as runtime information in its 'QueryContent' 's 'reads' and
+--   'writes' fields. The latter allows for unscheduled or foreign systems to
+--   run safely.
+--
+--   == Filtering
+--
+--   Other ECSes have two separate notions: whether an archetype meets a
+--   system's criteria and whether a query should be run at all (called a
+--   "run criterion"). A 'Query' combines both.
+--
+--   Use primitives like 'read', 'write', and 'optional' to filter archetypes.
+--   Use 'halt' to cancel an entire system (see 'halt' for caveats and safety
+--   properties).
+--
+--   TODO This is jank (come up w/ better querying primitives). Fix so you can:
+--
+--   @
+--       do
+--         read @(Position, Velocity)
+--         optional @Whatever
+--         write @Flying
+--         customQueryCached (do
+--           arch <- ask
+--           if VU.any (== 1) (arch ^. #types)
+--             then skip
+--             else pure ())
+--   @
+newtype Query x m a =
+  MkQuery
+  { unQuery :: StateT (QueryContent m) QueryIO a
+  }
+  deriving (Generic,Applicative,Functor,Monad, MonadState (QueryContent m))
+
+newtype QueryIO a = MkQueryIO { runQueryIO :: IO a }
+  deriving (Applicative, Functor, Monad, MonadIO)
+
+-- TODO
+-- instance Alternative (Query x m a) where
+--   empty = MkQuery
+
+data ArchTraversal = MkArchTraversal
+  { currArch   :: Arch
+  , currArchId :: ArchId
+    -- | 'matched' maps a single type ID to the index of the relevant component
+    --   store in the archetype.
+  , matched    :: VU.Vector Int
+  , currEntity :: EntityId
+  }
+  deriving Generic
+
+newtype SystemT x m a =
+  MkSystem
+  { unSystem :: ReaderT ArchTraversal m a
+  }
+  deriving (Generic,Applicative,Functor,Monad,MonadReader ArchTraversal, MonadTrans)
+
+data Blueprint x m a =
+  MkBlueprint
+  { query  :: Query x m a
+  , system :: SystemT x m a
+  }
+  deriving Generic

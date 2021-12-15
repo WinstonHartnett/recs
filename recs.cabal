@@ -33,6 +33,7 @@ library
       Core
       Stores
       Graph
+      TypeLevel
 
     -- LANGUAGE extensions used by modules in this package.
     -- Uses GHC2021 list
@@ -78,7 +79,7 @@ library
       OverloadedLabels
       OverloadedLists
     build-depends:
-        base ^>=4.15.0.0
+        base < 5
       , vector
       , exceptions
       , containers
@@ -86,13 +87,10 @@ library
       , generic-lens
       , vector-th-unbox
       , unordered-containers
-      , compact
       , mtl
       , witch
       , data-vector-growable
       , primitive
       , data-default
-      , tardis
-      , first-class-families
     hs-source-dirs:   src
     default-language: Haskell2010
