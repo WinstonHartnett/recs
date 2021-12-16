@@ -28,12 +28,11 @@ library
 
     -- Modules included in this library but not exported.
     other-modules:
-      Target
-      Access
-      Core
-      Stores
-      Graph
-      TypeLevel
+      Recs.Target
+      Recs.Core
+      Recs.Stores
+      Recs.Graph
+      Recs.TypeLevel
 
     -- LANGUAGE extensions used by modules in this package.
     -- Uses GHC2021 list
@@ -79,7 +78,7 @@ library
       OverloadedLabels
       OverloadedLists
     build-depends:
-        base < 5
+        base >= 4.15 && < 5
       , vector
       , exceptions
       , containers

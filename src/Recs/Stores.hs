@@ -1,11 +1,10 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-module Stores where
+module Recs.Stores where
 
-import Core
+import Recs.Core
 import qualified Data.Vector.Growable as VR
 import Data.IORef (IORef)
 import Control.Lens hiding (index)
@@ -15,7 +14,7 @@ import Control.Applicative (liftA2, liftA3)
 import Data.Coerce (coerce)
 import GHC.Generics (Generic)
 import GHC.TypeLits
-import TypeLevel
+import Recs.TypeLevel
 import qualified Data.Vector.Unboxed as VU
 import Data.Proxy (Proxy(..))
 import qualified Data.Vector as V
@@ -139,5 +138,3 @@ instance Get IO s => Get IO (MaybeStore s) where
   index (MkMaybeStore s) idx = traverse (`index` idx) s
 
 ---------------------------------------------------------------------------------
-
-

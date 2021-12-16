@@ -1,7 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module TypeLevel where
+module Recs.TypeLevel where
 
 import Data.Kind
 import Prelude

@@ -1,20 +1,23 @@
-{-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DefaultSignatures #-}
 
-module Core where
+module Recs.Core where
 
+import           Control.Applicative          (liftA2,liftA3)
 import           Control.Lens                 hiding (index)
 import           Control.Monad.Catch          (MonadCatch,MonadMask,MonadThrow)
 import           Control.Monad.Primitive      (PrimMonad(primitive),PrimState)
 import           Control.Monad.Reader
      (MonadIO,MonadReader(ask),MonadTrans(lift),ReaderT)
+import           Control.Monad.State          (MonadState,StateT)
 
 import           Data.Bifunctor               (bimap)
 import           Data.Generics.Labels
 import qualified Data.IntMap                  as IM
 import qualified Data.IntSet                  as IS
 import qualified Data.Primitive               as P
-import           Data.Proxy                   (Proxy)
+import           Data.Proxy                   (Proxy,Proxy(..))
+import qualified Data.Sequence                as S
 import qualified Data.Vector                  as V
 import qualified Data.Vector.Generic          as VG
 import qualified Data.Vector.Growable         as VR
@@ -24,11 +27,7 @@ import qualified Data.Vector.Unboxed.Mutable  as VUM
 
 import           GHC.Base                     (Any,RealWorld)
 import           GHC.Generics                 (Generic)
-import Control.Applicative (liftA2, liftA3)
-import GHC.TypeLits (Nat, KnownNat, natVal)
-import Data.Proxy (Proxy(..))
-import qualified Data.Sequence as S
-import Control.Monad.State (StateT, MonadState)
+import           GHC.TypeLits                 (KnownNat,Nat,natVal)
 
 newtype TypeId =
   MkTypeId
@@ -79,7 +78,7 @@ unsafeMkArchId x
 derivingUnbox "Edge" [t|Edge -> (Int, Int)|] [|\(MkEdge a r)
   -> (maybe (-1) unArchId a, maybe (-1) unArchId r)|] [|\x
   -> let (a, r) = bimap unsafeMkArchId unsafeMkArchId x
-     in MkEdge a r|]
+   in MkEdge a r|]
 
 data Arch =
   MkArch
@@ -141,6 +140,7 @@ instance PrimMonad m => PrimMonad (EcsT m) where
 
 class (KnownNat (Identified t)) => Identify t where
   type Identified t :: Nat
+
   identify :: Proxy t -> Int
   default identify :: (KnownNat (Identified t)) => Proxy t -> Int
   {-# INLINE identify #-}
@@ -149,7 +149,6 @@ class (KnownNat (Identified t)) => Identify t where
 -------------------------------------------------------------------------------
 -- Store Management
 -------------------------------------------------------------------------------
-
 class Get m s where
   index :: s -> Int -> EcsT m (Elem s)
 
@@ -201,7 +200,6 @@ instance (Monad m, Get m a, Get m b, Get m c, Get m d) => Get m (a, b, c, d) whe
 -------------------------------------------------------------------------------
 -- Archetype Traversal
 -------------------------------------------------------------------------------
-
 -- | 'QueryContent' stores the read and write accesses of a system along with a
 --   'valid' function that can be applied to an archetype to determine whether
 --   it is of interest to a system.
@@ -223,14 +221,14 @@ instance (Monad m, Get m a, Get m b, Get m c, Get m d) => Get m (a, b, c, d) whe
 data QueryContent m =
   MkQueryContent
   { -- | 'reads' is only used for system access control.
-    reads     :: S.Seq Int
+    reads  :: S.Seq Int
     -- | 'writes' is only used for system access control.
-  , writes    :: S.Seq Int
+  , writes :: S.Seq Int
     -- | When 'valid' returns @False@, the current archetype is skipped, and
     --   traversal continues from the next in sequence. Note that you should
     --   not ever mutate the ECS from within a query! This @m@ here should be
     --   used wisely.
-  , valid     :: Arch -> m Bool
+  , valid  :: Arch -> m Bool
   }
   deriving Generic
 
@@ -281,16 +279,19 @@ newtype Query x m a =
   MkQuery
   { unQuery :: StateT (QueryContent m) QueryIO a
   }
-  deriving (Generic,Applicative,Functor,Monad, MonadState (QueryContent m))
+  deriving (Generic,Applicative,Functor,Monad,MonadState (QueryContent m))
 
-newtype QueryIO a = MkQueryIO { runQueryIO :: IO a }
-  deriving (Applicative, Functor, Monad, MonadIO)
+newtype QueryIO a =
+  MkQueryIO
+  { runQueryIO :: IO a
+  }
+  deriving (Applicative,Functor,Monad,MonadIO)
 
 -- TODO
 -- instance Alternative (Query x m a) where
 --   empty = MkQuery
-
-data ArchTraversal = MkArchTraversal
+data ArchTraversal =
+  MkArchTraversal
   { currArch   :: Arch
   , currArchId :: ArchId
     -- | 'matched' maps a single type ID to the index of the relevant component
@@ -304,7 +305,7 @@ newtype SystemT x m a =
   MkSystem
   { unSystem :: ReaderT ArchTraversal m a
   }
-  deriving (Generic,Applicative,Functor,Monad,MonadReader ArchTraversal, MonadTrans)
+  deriving (Generic,Applicative,Functor,Monad,MonadReader ArchTraversal,MonadTrans)
 
 data Blueprint x m a =
   MkBlueprint

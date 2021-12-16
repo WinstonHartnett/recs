@@ -1,10 +1,10 @@
-module Graph where
+module Recs.Graph where
 
 import           Control.Lens
 import           Control.Monad               (unless)
 import           Control.Monad.Reader        (ask)
 
-import           Core
+import           Recs.Core
 
 import           Data.Generics.Labels
 import qualified Data.Primitive              as P
