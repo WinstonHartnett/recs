@@ -139,7 +139,7 @@ instance PrimMonad m => PrimMonad (EcsT m) where
 
   primitive = lift . primitive
 
-class Identify t where
+class (KnownNat (Identified t)) => Identify t where
   type Identified t :: Nat
   identify :: Proxy t -> Int
   default identify :: (KnownNat (Identified t)) => Proxy t -> Int

@@ -8,10 +8,11 @@ module Stores where
 import Core
 import qualified Data.Vector.Growable as VR
 import Data.IORef (IORef)
-import Control.Lens
+import Control.Lens hiding (index)
 import Data.Generics.Labels
 import Unsafe.Coerce (unsafeCoerce)
 import Control.Applicative (liftA2, liftA3)
+import Data.Coerce (coerce)
 import GHC.Generics (Generic)
 import GHC.TypeLits
 import TypeLevel
@@ -43,7 +44,7 @@ class (Identify c, Component c) => Pull layout c where
 {-# SPECIALIZE pull :: (Identify c, Component c) => Proxy Archetypal -> ArchTraversal -> EcsT IO (Storage c) #-}
 {-# SPECIALIZE pull :: (Identify c, Component c) => Proxy Flat -> ArchTraversal -> EcsT IO (Storage c) #-}
 
-instance (Identify c, Component c) => Pull Archetypal c where
+instance {-# OVERLAPPABLE #-} (Identify c, Component c) => Pull Archetypal c where
   pull _ trav =
     let storeIdx = (trav ^. #matched) VU.! identify (Proxy @c)
         pulled = (trav ^. #currArch . #components) V.! storeIdx
@@ -116,16 +117,27 @@ type instance Elem (Global c) = c
 
 ---------------------------------------------------------------------------------
 
-newtype MaybeStore s = MkMaybeStore ()
+newtype MaybeStore s = MkMaybeStore { unMaybeStore :: Maybe s }
   deriving Generic
 
 type instance Elem (MaybeStore s) = Maybe (Elem s)
 type instance Layout (MaybeStore s) = Archetypal
 
-instance (KnownNat (Identified c), Component c) => Identify (Maybe c) where
+instance (Identify c, Component c) => Identify (Maybe c) where
   type Identified (Maybe c) = Identified c
 
 instance Component c => Component (Maybe c) where
   type Storage (Maybe c) = MaybeStore (Storage c)
 
+instance Pull Archetypal c => Pull Archetypal (Maybe c) where
+  pull _ trav = do
+    let tId = identify $ Proxy @c
+        archHas = VU.elem tId (unTypeId $ trav ^. #currArch . #types)
+    undefined
+
 instance Get IO s => Get IO (MaybeStore s) where
+  index (MkMaybeStore s) idx = traverse (`index` idx) s
+
+---------------------------------------------------------------------------------
+
+

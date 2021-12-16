@@ -102,18 +102,45 @@ emap :: Query x m a -> SystemT x m a -> Blueprint x m a
 emap = MkBlueprint
 
 -- | Read from archetypes with 'c'.
-read :: forall c m a x t. (t ~ TupleToList c, IdentifyFromList t, Monad m) => Query '( t, '[] ) m ()
+read :: forall c m t. (t ~ TupleToList c, IdentifyFromList t, Monad m) => Query '( t, '[] ) m ()
 read = modify (over #reads (<> (identifyFromList $ Proxy @t)))
 
 -- | Write to archetypes with 'c'.
-write :: forall c m a x t. (t ~ TupleToList c, IdentifyFromList t, Monad m) => Query '( t, t ) m ()
+write :: forall c m t. (t ~ TupleToList c, IdentifyFromList t, Monad m) => Query '( t, t ) m ()
 write = modify
   (over #writes (<> (identifyFromList $ Proxy @t)) .
    over #reads  (<> (identifyFromList $ Proxy @t)))
 
 -- | Read from archetypes that might have 'c'.
-optional :: forall c m a x t. (t ~ TupleToList c, IdentifyFromList t, Monad m) => Query '( Map Maybe t, '[] ) m ()
+optional :: forall c m t. (t ~ TupleToList c, IdentifyFromList t, Monad m) => Query '( Map Maybe t, '[] ) m ()
 optional = unsafeCoerce $ read @c @m
+
+without :: forall c m x t. (t ~ TupleToList c, IdentifyFromList t, Monad m) => Query '( '[], '[] ) m ()
+without = undefined
+
+-- | Intersection set of 'x1' and 'x2'.
+type family x1 -⋂- x2 where
+  (a ': as) -⋂- b =
+    If (Contains a b)
+       (a ': (as -⋂- b))
+       (as -⋂- b)
+  '[] -⋂- _ = '[]
+
+-- | Union set of 'x1' and 'x2'.
+type family x1 -⋃- x2 where
+  (a ': as) -⋃- b =
+    If (Contains a b)
+       (as -⋃- b)
+       (a ': (as -⋃- b))
+  '[] -⋃- b = b
+
+-- | Difference set of 'x1' and 'x2', i.e. @x1 - x2@.
+type family x1 -=- x2 where
+  (a ': as) -=- b =
+    If (Contains a b)
+       (as -=- b)
+       (a ': (as -=- b))
+  '[] -=- b = '[]
 
 -- | Short-circuit querying and prevent the attached system from running
 --   until the next ECS loop.
@@ -150,11 +177,11 @@ type family AssertEachIn c x t :: Constraint where
                   :<>: 'Text " dependency ‘"
                   :<>: ShowType a
                   :<>:  'Text "’ in system.\n"
-                  :<>: 'Text "    • Hint: Add ‘"
+                  :<>: 'Text "    • Hint: Try adding ‘"
                   :<>: ShowAccess t
-                  :<>: 'Text " @"
+                  :<>: 'Text " @("
                   :<>: ShowType a
-                  :<>: 'Text "’ to your system's dependencies."
+                  :<>: 'Text ")’ to your system's dependencies."
                   )))
   AssertEachIn '[] _ _ = ()
 
@@ -171,8 +198,8 @@ type Has c l t =
 
 type Identifiable c = ToConstraint (Map Identify (TupleToList c))
 
-with :: forall c x. Has c x 'ReadAccess => SystemT x (EcsT IO) c
-with = ask >>= lift . locate @c @(IsTuple c) >>= lift . (`index` 0)
+grab :: forall c x. Has c x 'ReadAccess => SystemT x (EcsT IO) c
+grab = ask >>= lift . locate @c @(IsTuple c) >>= lift . (`index` 0)
 
 type HasBranch c l t =
   (HasBase c,
@@ -190,30 +217,79 @@ untag = undefined
 nothing :: Monad m => Query '( '[], '[] ) m a
 nothing = undefined
 
-(-.-) :: Query '(x, x') m a -> Query '(y, y') m a -> Query '(x ++ y, x' ++ y') m a
-(-.-) = undefined
+(-|-) ::
+  Query '( r1, w1 ) m () ->
+  Query '( r2, w2 ) m () ->
+  Query '( r1 -⋃- r2, w1 -⋃- w2 ) m ()
+(-|-) = undefined
+
+(-\-) ::
+  Query '( r1, w1 ) m () ->
+  Query '( r2, w2 ) m () ->
+  Query '( (r1 -=- r2) -=- w2, (w1 -=- w2) -=- r2 ) m ()
+(-\-) = undefined
+
+(-&-) ::
+  Query '( r1, w1 ) m () ->
+  Query '( r2, w2 ) m () ->
+  Query '( r1 -⋃- r2, w1 -⋃- w2 ) m ()
+(-&-) = undefined
 
 -- | 2 pieces:
 --
 --   1. query: which archetypes and components this system operates on
 --         * determines access to components
 --   2. system: the behavior given those targets
+--
+--   -⋃- --> and
+--   -⋂- --> only (may not need this?)
+--   -=- --> not
+--   -|- --> custom query
+--
+--   and
+--   not
+--   optional
+--   or
 mySystem =
-  emap (read @(Position, Velocity) -.- optional @Whatever -.- write @Flying)
-       (do MkVelocity v <- with
-           when (v >= 50) (branch @Whatever >> tag MkFlying))
+  (let query1 = read @Position @IO -&- write @Velocity
+       query2 = read @(Whatever, Time) -\- read @Position
+       query3 = read @Player
+    in query1 -|- query2 -|- query3)
+--   -- TODO Unify (Get, Set, etc.) & Locate so archetype iteration is the only way to get resources.
+--   --      This includes global stores.
+--   --      QUESTION What are the downsides?
+--   --      QUESTION Maybe keep Pull so that we can use the same syntax?
+--   --          There can't be a (Maybe Global) though, so...
+--   --          Just keep it simple wrt resources
+--   -- TODO Separate global & archetypal stores (which would greatly simplify
+--   --      resource management)?
+--   --      I AM TOO STUBBORN ^^^^
+--   --
+--   -- -&&- and
+--   -- -||- or
+--   -- -!!- not
+--   emap (let query1 = with @Position -&- write @Velocity
+--             query2 = with @(Whatever, Time) -\- with @Position
+--             query3 = with @Player
+--           in query1 -|- query2 -|- query3
+--             >> custom myCheck
+--             >> uncached
+--             >> threadLocal)
+--        (asum [ branch1, branch2 ])
+--   where
+--     branch1 = do
+--       (MkPosition p, MkVelocity v) <- bag
+--       undefined
+--     branch2 = do
+--       (MkWhatever, MkTime) <- bag
+--       undefined
 
-mySystem2 =
-  emap (optional @Whatever -.- write @(Velocity, Flying, VelocityUpdated))
-       (do MkVelocity v <- with
-           w <- with @(Maybe Whatever)
-           if v >= 50 then branch @(Whatever, VelocityUpdated)
-                             >> tag MkFlying
-                             >> untag @VelocityUpdated
-                      else tag (MkVelocity $ v + 1.0))
-
-stepPosition =
-  emap
-    (read @(Velocity, Time) -.- write @Position)
-    (with >>= \(MkTime dT, MkPosition p, MkVelocity v) -> tag (MkPosition $ p + dT * v))
-
+-- mySystem2 =
+--   emap (read @(Maybe Whatever) -&- write @(Velocity, Flying, VelocityUpdated))
+--        (do MkVelocity v <- bag
+--           --  w <- with @(Maybe Whatever)
+--           --  w <- with @(Maybe Time)
+--            if v >= 50 then branch @(Whatever, VelocityUpdated)
+--                              >> tag MkFlying
+--                              >> untag @VelocityUpdated
+--                       else tag (MkVelocity $ v + 1.0))

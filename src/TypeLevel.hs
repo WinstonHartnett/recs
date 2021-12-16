@@ -31,8 +31,6 @@ type family Map (f :: j -> k) l :: [k] where
   Map f (a ': as) = f a ': Map f as
   Map _ '[] = '[]
 
--- type MapConstraint (c :: i -> Constraint) t = ToTupleC (Map c (TupleToList t))
-
 type family ToConstraint (l :: [Constraint]) where
   ToConstraint (a ': as) = (a, ToConstraint as)
   ToConstraint '[] = ()
