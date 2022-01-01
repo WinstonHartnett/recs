@@ -1,2 +1,0 @@
-# recs
-Archetypal ECS
