@@ -22,7 +22,8 @@ maintainer:         winstonhartnett@gmail.com
 extra-source-files: CHANGELOG.md
 
 library
-  exposed-modules:  MyLib
+  exposed-modules:
+    Recs.Lib
 
   -- Modules included in this library but not exported.
   -- other-modules:
@@ -30,6 +31,7 @@ library
   default-extensions:
     BangPatterns
     BinaryLiterals
+    BlockArguments
     ConstrainedClassMethods
     ConstraintKinds
     DeriveDataTypeable
