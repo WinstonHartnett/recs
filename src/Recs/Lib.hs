@@ -399,9 +399,11 @@ instance PrimMonad Ecs where
   primitive = MkEcs . lift . IO
 
 -----------------------------------------------------------------------------------------
-newtype Command = MkCommand (Ecs ())
+newtype Command = MkCommand { unCommand :: Ecs () }
+  deriving Generic
 
-newtype Commands = MkCommands (VR.GrowableIOVector Command)
+newtype Commands = MkCommands { unCommands :: VR.GrowableIOVector Command }
+  deriving Generic
 
 newtype SystemState = MkSystemState
   { commands :: Maybe Commands
@@ -615,40 +617,45 @@ findNextAvailEntity vum = loop 0
              then loop (idx + 1)
              else pure $ Just idx
 
-newtype CommandBuilder = MkCommandBuilder { components :: V.Vector (TypeId, Maybe Int -> Arch -> Ecs ()) }
+data CommandBuilder = MkCommandBuilder
+  { commands   :: Commands
+  , components :: V.Vector (TypeId, Maybe Int -> Arch -> Ecs ())
+  }
   deriving Generic
 
 commitCommands :: Commands -> Ecs ()
 commitCommands (MkCommands commands) =
   VR.fromGrowable commands >>= VM.mapM_ (\(MkCommand c) -> c)
 
--- spawn :: Commands -> System CommandBuilder
--- spawn c = pure (MkCommandBuilder c)
+spawn :: Commands -> System CommandBuilder
+spawn c = pure (MkCommandBuilder { commands = c, components = V.empty })
 
-tagged :: forall c. Component c => CommandBuilder -> c -> System CommandBuilder
-tagged cb c = do
-  ident <- lift $ identified @c
+tagged :: forall c. Component c => c -> CommandBuilder -> System CommandBuilder
+tagged c cb = lift $ do
+  ident <- identified @c
   let modF = \idx targetArch -> do
         let (Just targetIdx) = findStoreIdx ident targetArch
             targetStore = unsafeCoerce @_ @(Layout c) $ (targetArch ^. #components) VG.! targetIdx
-         in case idx of
-            Just i -> modifyS targetStore i c
-            Nothing -> insertS targetStore c
-        -- nextIdx <- findNextAvailEntity =<< VR.fromGrowable (targetArch ^. #entities)
-        -- case nextIdx of
-        --   -- There is an empty slot in this archetype.
-        --   Just idx -> do
-        --     modifyS targetStore idx c
-        --     VR.modify (targetArch ^. #entities) (set _1 True) idx
-        --   -- No empty slot => push a new entity to all store.
-        --   Nothing -> do
-        --     insertS targetStore c
-        --     reserveEntityId >>= VR.push (targetArch ^. #entities) . (True, )
-  --   targetArch <- traverseRoot (Add [ident])
+         in maybe (insertS targetStore c) (\i -> modifyS targetStore i c) idx
   pure $ over #components (`VG.snoc` (ident, modF)) cb
 
--- finish :: CommandBuilder -> System ()
--- finish (MkCommandBuilder commands) = modify (set #commands (Just commands))
+finish :: CommandBuilder -> System EntityId
+finish cb = do
+  modify (set #commands (Just $ cb ^. #commands))
+  lift $ do
+    targetArch <- traverseRoot (Add . VG.convert . VG.map fst $ cb ^. #components)
+    nextIdx <- findNextAvailEntity =<< VR.fromGrowable (targetArch ^. #entities)
+    VG.forM_ (cb ^. #components) (\(_, f) ->
+      VR.push (cb ^. #commands . #unCommands) (MkCommand $ f nextIdx targetArch))
+    let archEntities = targetArch ^. #entities
+    case nextIdx of
+      Just idx -> do
+        VR.modify archEntities (set _1 True) idx
+        view _2 <$> VR.read archEntities idx
+      Nothing -> do
+        newEntId <- reserveEntityId
+        VR.push archEntities (True, newEntId)
+        pure newEntId
 
 destroy = undefined
 -----------------------------------------------------------------------------------------
@@ -858,17 +865,18 @@ instance Identify Velocity
 myFunc = do
   createArch []
   ecs <- get
-  let posSys (q :: Query (Nab Position)) = forQ q $ \qh -> do
+  let posSys (q :: Query (Nab Position |&| Nab Velocity)) = forQ q $ \qh -> do
+        p <- nab @Position qh
+        v <- nab @Velocity qh
+        liftIO . putStrLn $ show p <> " " <> show v
+      mySys :: Query (Nab Position |&| Nab Velocity) -> System ()
+      mySys q = forQ q $ \qh -> do
         p <- nab @Position qh
         liftIO . print $ p
-  -- let mySys :: Commands -> Global Position -> Query (Nab Position |&| Nab Velocity) -> System ()
-  --     mySys c g q = forQ q $ \qh -> do
-  --       liftIO . print $ unGlobal g
-  --       p <- nab @Position qh
-  --       liftIO . print $ p
-  --     myMaker c = VU.forM_ [0..1000] (spawn . make c . MkPosition)
-  -- (_, (MkSystemState commands)) <- queried myMaker >>= runSystem
-  -- commitCommands (fromJust commands) >> queried posSys >>= runSystem
+      myMaker c =
+        VU.forM_ [0..1000] (\p -> void $ spawn c >>= tagged (MkPosition p) >>= tagged (MkVelocity p) >>= finish)
+  (_, (MkSystemState commands)) <- queried myMaker >>= runSystem
+  commitCommands (fromJust commands) >> queried posSys >>= runSystem
   pure ()
 
 someFunc :: IO ()
