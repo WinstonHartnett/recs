@@ -1,3 +1,4 @@
+
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 
@@ -30,10 +31,11 @@ import qualified Data.HashMap.Strict          as HM
 import           Data.Hashable
 import qualified Data.IntMap                  as IM
 import qualified Data.IntSet                  as IS
+import           Data.IORef
 import qualified Data.Set                     as S
 import qualified Data.Sequence                as SQ
 import           Data.Kind
-import           Data.Maybe                   (fromJust,fromMaybe)
+import           Data.Maybe                   (fromJust,fromMaybe,isJust)
 import           Data.Proxy                   (Proxy(..))
 import qualified Data.Text                    as T
 import           Data.Typeable                (Typeable,typeRep,typeRepFingerprint)
@@ -42,6 +44,8 @@ import qualified Data.Vector.Generic          as VG
 import qualified Data.Vector.Generic.Mutable  as VGM
 import qualified Data.Vector.Growable         as VR
 import qualified Data.Vector.Mutable          as VM
+import qualified Data.Vector.Algorithms.Search as V
+import qualified Data.Vector.Algorithms.Heap as V
 import qualified Data.Vector.Unboxed          as VU
 import           Data.Vector.Unboxed.Deriving
 import qualified Data.Vector.Unboxed.Mutable  as VUM
@@ -124,7 +128,7 @@ type family Or a b where
 -- Core Data
 -----------------------------------------------------------------------------------------
 newtype TypeId = MkTypeId Word16
-  deriving (Generic,Eq,Show)
+  deriving (Generic,Eq,Ord,Show)
 
 instance From TypeId Int where
   from (MkTypeId w) = from w
@@ -137,7 +141,7 @@ instance TryFrom Int TypeId where
 instance Hashable TypeId
 
 newtype ArchId = MkArchId Word32
-  deriving (Generic,Eq,Show)
+  deriving (Generic,Eq,Ord,Show)
 
 instance From ArchId Int where
   from (MkArchId a) = fromIntegral a
@@ -145,7 +149,7 @@ instance From ArchId Int where
 instance Hashable ArchId
 
 newtype EntityId = MkEntityId Word32
-  deriving (Generic,Eq,Show)
+  deriving (Generic,Eq,Ord,Show)
 
 instance From EntityId Int where
   from (MkEntityId a) = fromIntegral a
@@ -310,23 +314,26 @@ data ArchRecord =
 data EntityInfo =
   MkEntityInfo
   { entityMap :: IM.IntMap ArchRecord
-  , entityCtr :: EntityId
+    -- TODO Change to PVar
+  , entityCtr :: IORef EntityId
   }
-  deriving (Generic,Show)
+  deriving Generic
 
-instance Default EntityInfo where
-  def =
-    MkEntityInfo
-    { entityMap = IM.empty
-    , entityCtr = MkEntityId 0
-    }
+instance {-# OVERLAPPING #-} Default (IO EntityInfo) where
+  def = do
+    e <- newIORef (MkEntityId 0)
+    pure $ MkEntityInfo
+      { entityMap = IM.empty
+      , entityCtr = e
+      }
 
 data TypeInfo =
   MkTypeInfo
   { -- | Map a GHC Fingerprint to a unique type identifier.
     types    :: HM.HashMap Fingerprint TypeId
     -- | Next type identifier.
-  , typeCtr  :: TypeId
+    -- TODO Change to PVar
+  , typeCtr  :: IORef TypeId
     -- | Constructors for type-specific stores.
     --   These are needed to create new archetypes with unknown runtime types.
     --   By default, all types point to 'GrowableIOVector'.
@@ -334,13 +341,14 @@ data TypeInfo =
   }
   deriving (Generic)
 
-instance Default TypeInfo where
-  def =
-    MkTypeInfo
-    { types   = HM.empty
-    , typeCtr = MkTypeId 0
-    , typeCons = V.empty
-    }
+instance {-# OVERLAPPING #-} Default (IO TypeInfo) where
+  def = do
+    t <- newIORef (MkTypeId 0)
+    pure $ MkTypeInfo
+      { types   = HM.empty
+      , typeCtr = t
+      , typeCons = V.empty
+      }
 
 -- | A cached query entry.
 data QueryEntry = MkQueryEntry
@@ -363,6 +371,22 @@ data World =
   }
   deriving Generic
 
+instance {-# OVERLAPPING #-} Default (IO World) where
+  def = do
+    arc <- VR.new
+    glo <- VR.new
+    t <- def
+    e <- def
+    gen <- VR.new
+    pure $ MkWorld
+        { archetypes = arc
+        , globals = glo
+        , types = t
+        , entities = e
+        , generations = gen
+        , queries = HM.empty
+        }
+
 newtype Ecs a =
   MkEcs
   { unEcs :: StateT World IO a
@@ -375,21 +399,25 @@ instance PrimMonad Ecs where
   primitive = MkEcs . lift . IO
 
 -----------------------------------------------------------------------------------------
-
 newtype Command = MkCommand (Ecs ())
 
 newtype Commands = MkCommands (VR.GrowableIOVector Command)
 
-data SystemState = MkSystemState
-  { commands :: Commands
-  , locals   :: V.Vector Any
+newtype SystemState = MkSystemState
+  { commands :: Maybe Commands
   }
   deriving Generic
 
+instance Default SystemState where
+  def = MkSystemState { commands = Nothing }
+
 newtype SystemT m a = MkSystemT
-  { unSystem :: ReaderT SystemState m a
+  { unSystem :: StateT SystemState m a
   }
-  deriving (Generic, Functor, Applicative, Monad, MonadIO, MonadReader SystemState, MonadTrans, MonadThrow)
+  deriving (Generic, Functor, Applicative, Monad, MonadIO, MonadState SystemState, MonadTrans, MonadThrow)
+
+runSystem :: System a -> Ecs (a, SystemState)
+runSystem sys = runStateT (unSystem sys) def
 
 instance PrimMonad m => PrimMonad (SystemT m) where
   type PrimState (SystemT m) = PrimState m
@@ -426,6 +454,8 @@ class Typeable t => Identify t where
     case typeRepFingerprint . typeRep $ Proxy @t of
       f@(Fingerprint h _) -> (fromRight (error "Word size mismatch") $ tryFrom h, f)
 
+instance {-# OVERLAPPABLE #-} Typeable t => Identify t
+
 class Storage a where
   type Elem a
   type Idx a
@@ -443,6 +473,19 @@ class Storage a where
 class (Storage (Layout c), Identify c) => Component (c :: Type) where
   type Layout c
 
+reserveAtomic :: Lens' World (IORef c) -> (c -> (c, b)) -> Ecs b
+reserveAtomic l f = liftIO . (`atomicModifyIORef` f) . view l =<< get
+
+reserveTypeId =
+  reserveAtomic
+    (#types . #typeCtr)
+    (\t@(MkTypeId i) -> (MkTypeId $ i + 1, t))
+
+reserveEntityId =
+  reserveAtomic
+    (#entities . #entityCtr)
+    (\e@(MkEntityId i) -> (MkEntityId $ i + 1, e))
+
 -- | Retrieve this type's ID from the global type registry, adding any necessary
 --   information to the type registry.
 identified :: forall c. Component c => Ecs TypeId
@@ -451,17 +494,16 @@ identified = do
   case uncurry HM.lookup' (identify @c) (ecs ^. (#types . #types)) of
     Just tId -> pure tId
     Nothing -> do
+      nextTId <- reserveTypeId
       let (h, f) = identify @c
-          nextTId = ecs ^. #types . #typeCtr
           updateTInfo =
             let addTCon tCons = VG.snoc tCons (unsafeCoerce <$> initS @(Layout c))
              in over #types (over #typeCons addTCon
-                              . over #types (HM.insert' h f nextTId)
-                              . over #typeCtr (\(MkTypeId t) -> MkTypeId $ t + 1))
+                              . over #types (HM.insert' h f nextTId))
           pushNewEdges = VR.fromGrowable (ecs ^. #archetypes) >>= VM.mapM_ (\a -> do
                           VR.push (a ^. #edges) (MkEdge Nothing Nothing))
           pushGlobals = VR.push (ecs ^. #globals) (unsafeCoerce . error $ "Tried to access missing global '" <> show (typeRep $ Proxy @c) <> "'.")
-       in modify updateTInfo >> pushNewEdges >> pushGlobals >> pure nextTId
+      modify updateTInfo >> pushNewEdges >> pushGlobals >> pure nextTId
 
 instance Storage (VR.GrowableIOVector c) where
   type Elem (VR.GrowableIOVector c) = c
@@ -515,41 +557,33 @@ instance DesugarQuery q => Queryable (Query q) where
 instance Component c => Queryable (Global c) where
   query = do
     ecs <- get
-    globalId <- lift $ identified @c
+    globalId <- identified @c
     unsafeCoerce @_ @(Global c) <$> VR.read (ecs ^. #globals) (from globalId)
 
 instance Queryable (Local c) where
   query = undefined
 
 instance Queryable Commands where
-  -- query =
-  -- query = view #commands <$> ask
+  query = do
+    v <- VR.new
+    pure $ MkCommands v
 
 -----------------------------------------------------------------------------------------
 -- | Get the return type of a function.
 type family Returns s where
   Returns (a -> b) = Returns b
-  Returns (System a) = (a, Commands)
+  -- Returns (System a) = (a, Commands)
+  Returns (System a) = System a
 
--- | Executes system, applying arguments as needed.
+-- | Saturate a system's arguments as needed.
 class Queried s where
-  queried :: s -> System (Returns s)
+  queried :: s -> Ecs (Returns s)
 
 instance (Queryable p, Queried s) => Queried (p -> s) where
   queried s = (s <$> query @p) >>= queried
 
--- Systems must eventually return a value.
 instance Queried (System a) where
-  queried sys = do
-    (,) <$> sys <*> (view #commands <$> ask)
-    -- (,) <$> (runReaderT (unSystem sys) =<< ask) <*> ask
-    -- newCommands <- MkCommands <$> VR.new
-    -- (,) <$> flip runReaderT newCommands (unSystem sys) <*> pure newCommands
-    -- TODO Move this to the global command commit queue
-    -- UNSAFE FOR PARALLEL EXECUTION!!
-    -- VR.unsafeFreeze (queue commands) >>= VG.mapM_ (\(MkCommand c) -> c)
-    -- pure res
-
+  queried = pure . id
 
 -----------------------------------------------------------------------------------------
 -- TODO For now just one component
@@ -578,22 +612,43 @@ findNextAvailEntity vum = loop 0
       | otherwise = do
           (open, _) <- VUM.read vum idx
           if open
-             then pure $ Just idx
-             else loop (idx + 1)
+             then loop (idx + 1)
+             else pure $ Just idx
 
-make :: forall c. Component c => Commands -> c -> System ()
-make commands c = do
-  (MkCommands commands') <- view #commands <$> ask
-  VR.push commands' $ MkCommand $ do
-    ident <- identified @c
-    targetArch <- traverseRoot (Add [ident])
-    let targetStore = unsafeCoerce @_ @(Layout c) $ (targetArch ^. #components) VG.! from ident
-    -- -- TODO For now we just traverse the entityIds until we find a hidey hole
-    nextIdx <- findNextAvailEntity =<< VR.fromGrowable (targetArch ^. #entities)
-    case nextIdx of
-      -- TODO Remember ->>>> multiple components!
-      Just idx -> modifyS targetStore idx c
-      Nothing -> insertS targetStore c
+newtype CommandBuilder = MkCommandBuilder { components :: V.Vector (TypeId, Maybe Int -> Arch -> Ecs ()) }
+  deriving Generic
+
+commitCommands :: Commands -> Ecs ()
+commitCommands (MkCommands commands) =
+  VR.fromGrowable commands >>= VM.mapM_ (\(MkCommand c) -> c)
+
+-- spawn :: Commands -> System CommandBuilder
+-- spawn c = pure (MkCommandBuilder c)
+
+tagged :: forall c. Component c => CommandBuilder -> c -> System CommandBuilder
+tagged cb c = do
+  ident <- lift $ identified @c
+  let modF = \idx targetArch -> do
+        let (Just targetIdx) = findStoreIdx ident targetArch
+            targetStore = unsafeCoerce @_ @(Layout c) $ (targetArch ^. #components) VG.! targetIdx
+         in case idx of
+            Just i -> modifyS targetStore i c
+            Nothing -> insertS targetStore c
+        -- nextIdx <- findNextAvailEntity =<< VR.fromGrowable (targetArch ^. #entities)
+        -- case nextIdx of
+        --   -- There is an empty slot in this archetype.
+        --   Just idx -> do
+        --     modifyS targetStore idx c
+        --     VR.modify (targetArch ^. #entities) (set _1 True) idx
+        --   -- No empty slot => push a new entity to all store.
+        --   Nothing -> do
+        --     insertS targetStore c
+        --     reserveEntityId >>= VR.push (targetArch ^. #entities) . (True, )
+  --   targetArch <- traverseRoot (Add [ident])
+  pure $ over #components (`VG.snoc` (ident, modF)) cb
+
+-- finish :: CommandBuilder -> System ()
+-- finish (MkCommandBuilder commands) = modify (set #commands (Just commands))
 
 destroy = undefined
 -----------------------------------------------------------------------------------------
@@ -632,10 +687,13 @@ instance Component c => DesugarQuery (With c) where
 --   mapping a type to an archetype's matching component store.
 type QueryRelevant = ReaderT (Arch, ArchId) (MaybeT Ecs) (IM.IntMap Any)
 
+findStoreIdx :: TypeId -> Arch -> Maybe Int
+findStoreIdx tId = VU.findIndex (== tId) . view #types
+
 basicHas :: QuerySubject -> QueryRelevant
 basicHas qs = do
   (a, _) <- ask
-  let targetStore = \tId -> ((a ^. #components) VG.!) <$> VU.findIndex (== tId) (a ^. #types)
+  let targetStore = \tId -> ((a ^. #components) VG.!) <$> findStoreIdx tId a
   case qs of
     SubMaybe tId -> pure . maybe IM.empty (IM.singleton (from tId)) $ targetStore tId
     SubBase tId -> maybe mzero (pure . IM.singleton (from tId)) $ targetStore tId
@@ -659,13 +717,14 @@ runQueryOn qo as = do
   ecs <- get
   let filterArch (aId, a) = runMaybeT $ do
         queryRes <- runQueryOperator (a, aId) qo
+        nextTId <- liftIO $ from <$> readIORef (ecs ^. #types . #typeCtr)
         let queryEntries = IM.toList queryRes
             matched' = VG.create $ do
-              v <- VGM.new $ from (ecs ^. #types . #typeCtr)
+              v <- VGM.new nextTId
               forM_ queryEntries (\(i, a) -> VGM.write v i a)
               pure v
             matchedOk' = VG.create $ do
-              v <- VGM.new $ from (ecs ^. #types . #typeCtr)
+              v <- VGM.new nextTId
               forM_ (map fst queryEntries) (\i -> VGM.write v i True)
               pure v
         pure $ MkQueryTraversal
@@ -691,23 +750,27 @@ runAndCacheQuery qo = do
 getStore :: forall c q. Component c => QueryHandle q -> Ecs (Layout c)
 getStore qh = do
   ident <- identified @c
-  pure $ unsafeCoerce @_ @(Layout c) $ (qh ^. #trav . #currArch . #components) VG.! from ident
+  let currArch = qh ^. #trav . #currArch
+      targetStore = (currArch ^. #components) VG.! fromJust (findStoreIdx ident currArch)
+  pure $ unsafeCoerce @_ @(Layout c) $ targetStore
 
 traverseArch :: Arch -> ArchSearch -> Ecs Arch
 traverseArch root as = do
   ecs <- get
-  let (tId, edgeLens) = case as of
+  let (tIds, edgeLens) = case as of
         Add t    -> (t, #add)
         Remove t -> (t, #remove)
-      loop tId' root' = case VG.uncons tId' of
-        Just (nextTId, stack) -> do
-          targetEdge <- view edgeLens <$> (root' ^. #edges) `VR.read` from nextTId
-          nextRoot <- case targetEdge of
-            Just r  -> (ecs ^. #archetypes) `VR.read` from r
-            Nothing -> undefined -- TODO create archetype
-          loop stack nextRoot
-        Nothing -> pure root'
-  loop tId root
+      tLen = VG.length tIds
+      loop idx root'
+        | idx >= tLen = pure root'
+        | otherwise = do
+            let nextTId = tIds VG.! idx
+            targetEdge <- view edgeLens <$> (root' ^. #edges) `VR.read` from nextTId
+            nextRoot <- case targetEdge of
+              Just r  -> (ecs ^. #archetypes) `VR.read` from r
+              Nothing -> view _2 <$> createArch (VG.modify V.sort $ root ^. #types VG.++ VG.take (idx + 1) tIds)
+            loop (idx + 1) nextRoot
+  loop 0 root
 
 traverseRoot :: ArchSearch -> Ecs Arch
 traverseRoot as = do
@@ -715,15 +778,16 @@ traverseRoot as = do
   root <- VR.read (ecs ^. #archetypes) 0
   traverseArch root as
 
-createArch :: VU.Vector TypeId -> Ecs Arch
+createArch :: VU.Vector TypeId -> Ecs (ArchId, Arch)
 createArch tIds = do
   ecs <- get
+  liftIO . putStrLn $ "createArch | creating arch of " <> show tIds
   newArchId <- MkArchId . tryFrom' <$> VR.length (ecs ^. #archetypes)
   newArch <- do
     entities' <- VR.new
-    edges' <-
-      let edgesLen = from $ ecs ^. #types . #typeCtr
-       in VUM.replicate edgesLen (MkEdge { add = Nothing, remove = Nothing }) >>= VR.toGrowable
+    edges' <- do
+      edgesLen <- liftIO $ from <$> readIORef (ecs ^. #types . #typeCtr)
+      VUM.replicate edgesLen (MkEdge { add = Nothing, remove = Nothing }) >>= VR.toGrowable
     components' <- VG.forM (VG.convert tIds) \tId -> (ecs ^. #types . #typeCons) VG.! from tId
 
     pure $ MkArch
@@ -742,7 +806,7 @@ createArch tIds = do
   -- Update incoming & outgoing edges for previous-generation archetypes,
   -- this archetype, and next-generation archetypes.
   populateEdges (newArchId, newArch)
-  pure newArch
+  pure (newArchId, newArch)
 
 populateEdges :: (ArchId, Arch) -> Ecs ()
 populateEdges (archId, arch) = do
@@ -774,7 +838,7 @@ forQ :: Query q -> (QueryHandle q -> System ()) -> System ()
 forQ q f = do
   VG.forM_ (q ^. #unQuery) \qh -> do
     entities <- VR.fromGrowable (qh ^. #trav . #currArch . #entities)
-    VUM.iforM_ entities \idx (isValid, _) -> when isValid . f $ set #entity idx qh
+    VUM.iforM_ entities \idx (isValid, _) -> when isValid (f $ set #entity idx qh)
 
 ------------------------------------------------------------------------------------------
 newtype Position = MkPosition Double
@@ -782,29 +846,30 @@ newtype Position = MkPosition Double
 
 derivingUnbox "Position" [t|Position -> Double|] [|\(MkPosition p) -> p|] [|MkPosition|]
 
+instance Identify Position
+
 newtype Velocity = MkVelocity Double
   deriving (Generic, Show)
 
 derivingUnbox "Velocity" [t|Velocity -> Double|] [|\(MkVelocity v) -> v|] [|MkVelocity|]
 
--- myFunc = do
---   createArch []
---   createArch . VG.convert =<< V.sequence [identified @Position, identified @Velocity]
---   createArch . VG.convert =<< V.sequence [identified @Position]
---   q  <- query @(Query (Nab Position |&| Nab Velocity))
---   q' <- query @(Query (Nab Position))
---   let mySys :: Global Position -> Query (Nab Position |&| Nab Velocity) -> System ()
---       mySys g q = forQ q $ \qh -> do
---         liftIO . print $ unGlobal g
---         p <- nab @Position qh
---         com <- ask
---         make com (MkPosition 1.0)
---         liftIO . print $ p
---       myMakerSys = do
---         com <- ask
---         make com (MkPosition 1.0)
---   (_, commands) <- queried myMakerSys
---   pure ()
+instance Identify Velocity
+
+myFunc = do
+  createArch []
+  ecs <- get
+  let posSys (q :: Query (Nab Position)) = forQ q $ \qh -> do
+        p <- nab @Position qh
+        liftIO . print $ p
+  -- let mySys :: Commands -> Global Position -> Query (Nab Position |&| Nab Velocity) -> System ()
+  --     mySys c g q = forQ q $ \qh -> do
+  --       liftIO . print $ unGlobal g
+  --       p <- nab @Position qh
+  --       liftIO . print $ p
+  --     myMaker c = VU.forM_ [0..1000] (spawn . make c . MkPosition)
+  -- (_, (MkSystemState commands)) <- queried myMaker >>= runSystem
+  -- commitCommands (fromJust commands) >> queried posSys >>= runSystem
+  pure ()
 
 someFunc :: IO ()
 someFunc = putStrLn "someFunc"
