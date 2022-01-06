@@ -1,0 +1,84 @@
+cabal-version:      2.4
+name:               recs-examples
+version:            0.1.0.0
+
+-- A short (one-line) description of the package.
+-- synopsis:
+
+-- A longer description of the package.
+-- description:
+
+-- A URL where users can report bugs.
+-- bug-reports:
+
+-- The license under which the package is released.
+-- license:
+author:             Winston Hartnett
+maintainer:         winstonhartnett@gmail.com
+
+-- A copyright notice.
+-- copyright:
+-- category:
+extra-source-files: CHANGELOG.md
+
+executable recs-examples
+    main-is:          Main.hs
+
+    -- Modules included in this executable, other than Main.
+    -- other-modules:
+    default-extensions:
+      BangPatterns
+      BinaryLiterals
+      BlockArguments
+      ConstrainedClassMethods
+      ConstraintKinds
+      DeriveDataTypeable
+      DeriveFoldable
+      DeriveFunctor
+      DeriveGeneric
+      DeriveLift
+      DeriveTraversable
+      EmptyCase
+      EmptyDataDeriving
+      ExistentialQuantification
+      ExplicitForAll
+      FlexibleContexts
+      FlexibleInstances
+      GADTSyntax
+      GeneralisedNewtypeDeriving
+      HexFloatLiterals
+      ImportQualifiedPost
+      InstanceSigs
+      KindSignatures
+      MultiParamTypeClasses
+      NamedFieldPuns
+      NamedWildCards
+      NumericUnderscores
+      OverloadedLabels
+      OverloadedLists
+      PolyKinds
+      PostfixOperators
+      RankNTypes
+      ScopedTypeVariables
+      StandaloneDeriving
+      StandaloneKindSignatures
+      TemplateHaskell
+      TupleSections
+      TypeApplications
+      TypeFamilies
+      TypeOperators
+      TypeSynonymInstances
+
+    -- LANGUAGE extensions used by modules in this package.
+    -- other-extensions:
+    build-depends:
+        base
+      , recs
+      , vector
+      , mtl
+      , data-default
+      , linear
+      , vector-th-unbox
+    hs-source-dirs:   app
+    ghc-options:      -rtsopts -with-rtsopts=-p
+    default-language: Haskell2010

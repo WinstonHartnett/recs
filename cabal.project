@@ -1,0 +1,6 @@
+packages:
+  recs
+  recs-examples
+  ../arrayfire-haskell
+  ../generic-lens/generic-lens
+  ../generic-lens/generic-lens-core

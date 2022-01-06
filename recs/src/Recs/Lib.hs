@@ -49,6 +49,7 @@ import qualified Data.Vector.Algorithms.Heap as V
 import qualified Data.Vector.Unboxed          as VU
 import           Data.Vector.Unboxed.Deriving
 import qualified Data.Vector.Unboxed.Mutable  as VUM
+import           Data.Primitive.PVar
 import           Data.Word
 
 import           GHC.Base                     (Any,RealWorld, IO(..))
@@ -60,6 +61,9 @@ import           GHC.Stack                    (HasCallStack)
 import           Unsafe.Coerce
 
 import           Witch                        hiding (over)
+
+tryFrom' :: TryFrom a b => a -> b
+tryFrom' = fromRight undefined . tryFrom
 
 untilM :: Monad m => (a -> m Bool) -> (a -> m a) -> m a -> m a
 untilM p f a = do
@@ -134,9 +138,7 @@ instance From TypeId Int where
   from (MkTypeId w) = from w
 
 instance TryFrom Int TypeId where
-  tryFrom i = case tryFrom i of
-    Left tfe -> Left $ coerce tfe
-    Right a  -> Right $ MkTypeId a
+  tryFrom i = coerce (MkTypeId <$> tryFrom i)
 
 instance Hashable TypeId
 
@@ -146,6 +148,9 @@ newtype ArchId = MkArchId Word32
 instance From ArchId Int where
   from (MkArchId a) = fromIntegral a
 
+instance TryFrom Int ArchId where
+  tryFrom i = coerce (MkArchId <$> tryFrom i)
+
 instance Hashable ArchId
 
 newtype EntityId = MkEntityId Word32
@@ -153,6 +158,9 @@ newtype EntityId = MkEntityId Word32
 
 instance From EntityId Int where
   from (MkEntityId a) = fromIntegral a
+
+instance TryFrom Int EntityId where
+  tryFrom i = coerce (MkEntityId <$> tryFrom i)
 
 instance Hashable EntityId
 
@@ -291,7 +299,8 @@ data Edge =
 
 data Arch =
   MkArch
-  { components :: V.Vector Any
+  { archId     :: ArchId
+  , components :: V.Vector Any
   , entities   :: VR.GrowableUnboxedIOVector (Bool, EntityId)
   , types      :: VU.Vector TypeId
   , edges      :: VR.GrowableUnboxedIOVector Edge
@@ -306,26 +315,74 @@ data ArchSearch
 data ArchRecord =
   MkArchRecord
   { archId :: ArchId
-  , row    :: Int
+  , idx    :: Int
   }
   deriving (Generic,Show)
 
+derivingUnbox "ArchRecord" [t|ArchRecord -> (ArchId, Int)|] [|\(MkArchRecord a i) -> (a, i)|] [|uncurry MkArchRecord|]
+
 --------------------------------------------------------------------------------
+-- Based on Bevy EntityID reservation system
 data EntityInfo =
   MkEntityInfo
-  { entityMap :: IM.IntMap ArchRecord
-    -- TODO Change to PVar
-  , entityCtr :: IORef EntityId
+  { meta       :: VR.GrowableUnboxedIOVector ArchRecord
+  , pending    :: VR.GrowableUnboxedIOVector EntityId
+  , freeCursor :: PVar Int RealWorld
+  , len        :: PVar Int RealWorld
   }
   deriving Generic
 
+-- | Concurrently reserve a new entity ID.
+--
+--   __Safety__: thread-safe.
+reserveEntityId :: Ecs EntityId
+reserveEntityId = do
+  eInfo <- view #entities <$> get
+  n <- atomicSubIntPVar (eInfo ^. #freeCursor) 1
+  if n > 0
+    then VR.read (eInfo ^. #pending) (n - 1)
+    else tryFrom' . subtract n <$> VR.length (eInfo ^. #meta)
+
+-- | Flush pending entity IDs from the queue.
+--
+--   __Safety__: not thread-safe.
+flushEntities :: EntityInfo -> Ecs ()
+flushEntities entityInfo = do
+  emptyArch' <- emptyArch
+
+  newFreeCursor <- do
+    currFreeCursor <- readPVar $ entityInfo ^. #freeCursor
+    if currFreeCursor >= 0
+      then pure currFreeCursor
+      else do
+        -- Allocate new IDs in the entity meta vector.
+        oldMetaLen <- VR.length $ entityInfo ^. #meta
+        modifyPVar_ (entityInfo ^. #len) (+ (-currFreeCursor))
+        VU.forM_ [(-currFreeCursor)..(oldMetaLen + (-currFreeCursor))] \i ->
+          -- TODO Would be more efficient to resize the array once and write over
+          VR.push (entityInfo ^. #meta) =<< allocateEntity emptyArch' (tryFrom' i)
+        writePVar (entityInfo ^. #freeCursor) 0
+        pure 0
+
+  pendingLen <- VR.length (entityInfo ^. #pending)
+  modifyPVar_ (entityInfo ^. #len) (+ (pendingLen - newFreeCursor))
+
+  VU.forM_ [newFreeCursor..pendingLen] \i ->
+    VR.write (entityInfo ^. #meta) i =<< allocateEntity emptyArch' (tryFrom' i)
+
 instance {-# OVERLAPPING #-} Default (IO EntityInfo) where
   def = do
-    e <- newIORef (MkEntityId 0)
+    meta       <- VR.new
+    pending    <- VR.new
+    freeCursor <- newPVar 0
+    len        <- newPVar 0
+
     pure $ MkEntityInfo
-      { entityMap = IM.empty
-      , entityCtr = e
-      }
+            { meta = meta
+            , pending = pending
+            , freeCursor = freeCursor
+            , len = len
+            }
 
 data TypeInfo =
   MkTypeInfo
@@ -427,6 +484,18 @@ instance PrimMonad m => PrimMonad (SystemT m) where
 
 type System a = SystemT Ecs a
 
+emptyArch :: Ecs Arch
+emptyArch = do
+  ecs <- get
+  VR.read (ecs ^. #archetypes) 0
+
+-- | Allocate a new entity in an archetype.
+allocateEntity :: Arch -> EntityId -> Ecs ArchRecord
+allocateEntity a eId = do
+  idx <- VR.length (a ^. #entities)
+  VR.push (a ^. #entities) (True, eId)
+  pure $ MkArchRecord { archId = a ^. #archId, idx = idx }
+
 -----------------------------------------------------------------------------------------
 derivingUnbox "Edge" [t|Edge -> (ArchId, ArchId)|] [|\(MkEdge a r)
   -> (fromMaybe (MkArchId (-1)) a, fromMaybe (MkArchId (-1)) r)|] [|\(a, r)
@@ -483,10 +552,10 @@ reserveTypeId =
     (#types . #typeCtr)
     (\t@(MkTypeId i) -> (MkTypeId $ i + 1, t))
 
-reserveEntityId =
-  reserveAtomic
-    (#entities . #entityCtr)
-    (\e@(MkEntityId i) -> (MkEntityId $ i + 1, e))
+-- reserveEntityId =
+--   reserveAtomic
+--     (#entities . #entityCtr)
+--     (\e@(MkEntityId i) -> (MkEntityId $ i + 1, e))
 
 -- | Retrieve this type's ID from the global type registry, adding any necessary
 --   information to the type registry.
@@ -546,9 +615,6 @@ insertGlobal g = do
 class Queryable q where
   -- FIXME Redo this whole setup to properly use System
   query :: Ecs q
-
-tryFrom' :: TryFrom a b => a -> b
-tryFrom' = fromRight undefined . tryFrom
 
 instance DesugarQuery q => Queryable (Query q) where
   query = do
@@ -618,8 +684,9 @@ findNextAvailEntity vum = loop 0
              else pure $ Just idx
 
 data CommandBuilder = MkCommandBuilder
-  { commands   :: Commands
-  , components :: V.Vector (TypeId, Maybe Int -> Arch -> Ecs ())
+  { commands       :: Commands
+  , componentTypes :: VR.GrowableUnboxedIOVector TypeId
+  , components     :: VR.GrowableIOVector (Maybe Int -> Arch -> Ecs ())
   }
   deriving Generic
 
@@ -627,8 +694,11 @@ commitCommands :: Commands -> Ecs ()
 commitCommands (MkCommands commands) =
   VR.fromGrowable commands >>= VM.mapM_ (\(MkCommand c) -> c)
 
+withCommands :: Commands -> (CommandBuilder -> System a) -> System a
+withCommands c = undefined
+
 spawn :: Commands -> System CommandBuilder
-spawn c = pure (MkCommandBuilder { commands = c, components = V.empty })
+spawn c = MkCommandBuilder c <$> VR.new <*> VR.new
 
 tagged :: forall c. Component c => c -> CommandBuilder -> System CommandBuilder
 tagged c cb = lift $ do
@@ -637,25 +707,30 @@ tagged c cb = lift $ do
         let (Just targetIdx) = findStoreIdx ident targetArch
             targetStore = unsafeCoerce @_ @(Layout c) $ (targetArch ^. #components) VG.! targetIdx
          in maybe (insertS targetStore c) (\i -> modifyS targetStore i c) idx
-  pure $ over #components (`VG.snoc` (ident, modF)) cb
+  VR.push (cb ^. #components) modF
+  VR.push (cb ^. #componentTypes) ident
+  pure cb
 
-finish :: CommandBuilder -> System EntityId
+finish :: CommandBuilder -> System ()
 finish cb = do
   modify (set #commands (Just $ cb ^. #commands))
-  lift $ do
-    targetArch <- traverseRoot (Add . VG.convert . VG.map fst $ cb ^. #components)
+  VR.push (cb ^. #commands ^. #unCommands) $ MkCommand $ do
+    componentTypes' <- VU.unsafeFreeze =<< VR.fromGrowable (cb ^. #componentTypes)
+    components' <- V.unsafeFreeze =<< VR.fromGrowable (cb ^. #components)
+
+    targetArch <- traverseRoot $ Add componentTypes'
     nextIdx <- findNextAvailEntity =<< VR.fromGrowable (targetArch ^. #entities)
-    VG.forM_ (cb ^. #components) (\(_, f) ->
-      VR.push (cb ^. #commands . #unCommands) (MkCommand $ f nextIdx targetArch))
+    VG.iforM_ components' (\idx cF -> cF nextIdx targetArch)
+
     let archEntities = targetArch ^. #entities
     case nextIdx of
       Just idx -> do
         VR.modify archEntities (set _1 True) idx
-        view _2 <$> VR.read archEntities idx
+        -- view _2 <$> VR.read archEntities idx
       Nothing -> do
         newEntId <- reserveEntityId
         VR.push archEntities (True, newEntId)
-        pure newEntId
+        -- pure newEntId
 
 destroy = undefined
 -----------------------------------------------------------------------------------------
@@ -757,9 +832,7 @@ runAndCacheQuery qo = do
 getStore :: forall c q. Component c => QueryHandle q -> Ecs (Layout c)
 getStore qh = do
   ident <- identified @c
-  let currArch = qh ^. #trav . #currArch
-      targetStore = (currArch ^. #components) VG.! fromJust (findStoreIdx ident currArch)
-  pure $ unsafeCoerce @_ @(Layout c) $ targetStore
+  pure $ unsafeCoerce @_ @(Layout c) $ (qh ^. #trav . #matched) VG.! from ident
 
 traverseArch :: Arch -> ArchSearch -> Ecs Arch
 traverseArch root as = do
@@ -775,20 +848,28 @@ traverseArch root as = do
             targetEdge <- view edgeLens <$> (root' ^. #edges) `VR.read` from nextTId
             nextRoot <- case targetEdge of
               Just r  -> (ecs ^. #archetypes) `VR.read` from r
-              Nothing -> view _2 <$> createArch (VG.modify V.sort $ root ^. #types VG.++ VG.take (idx + 1) tIds)
+              Nothing -> createArch (VG.modify V.sort $ root ^. #types VG.++ VG.take (idx + 1) tIds)
             loop (idx + 1) nextRoot
   loop 0 root
 
+-- | Traverse the archetype graph starting at the empty archetype.
 traverseRoot :: ArchSearch -> Ecs Arch
 traverseRoot as = do
   ecs <- get
   root <- VR.read (ecs ^. #archetypes) 0
   traverseArch root as
 
-createArch :: VU.Vector TypeId -> Ecs (ArchId, Arch)
+-- | Create a new archetype with the given types.
+--
+--   The following invariants are /not/ checked:
+--     * An archetype with the same types doesn't already exist
+--     * Input types are sorted
+createArch :: VU.Vector TypeId -> Ecs Arch
 createArch tIds = do
   ecs <- get
+
   liftIO . putStrLn $ "createArch | creating arch of " <> show tIds
+
   newArchId <- MkArchId . tryFrom' <$> VR.length (ecs ^. #archetypes)
   newArch <- do
     entities' <- VR.new
@@ -798,7 +879,8 @@ createArch tIds = do
     components' <- VG.forM (VG.convert tIds) \tId -> (ecs ^. #types . #typeCons) VG.! from tId
 
     pure $ MkArch
-      { components = components'
+      { archId = newArchId
+      , components = components'
       , entities = entities'
       , types = tIds
       , edges = edges'
@@ -812,16 +894,19 @@ createArch tIds = do
   VR.read (ecs ^. #generations) (VG.length tIds) >>= (`VR.push` newArchId)
   -- Update incoming & outgoing edges for previous-generation archetypes,
   -- this archetype, and next-generation archetypes.
-  populateEdges (newArchId, newArch)
-  pure (newArchId, newArch)
+  populateEdges newArch
+  pure newArch
 
-populateEdges :: (ArchId, Arch) -> Ecs ()
-populateEdges (archId, arch) = do
+-- | Populate archetype edges from previous-generation archetypes to this archetype,
+--   and from this archetype to next-generation archetypes.
+populateEdges :: Arch -> Ecs ()
+populateEdges arch = do
   ecs <- get
   genCount <- VR.length (ecs ^. #generations)
   let thisGen           = VG.length $ arch ^. #types
       nextGen           = thisGen + 1
       prevGen           = thisGen - 1
+      archId            = arch ^. #archId
       getGeneration gen =
         (ecs ^. #generations) `VR.read` gen
         >>= VR.freeze
@@ -841,43 +926,9 @@ populateEdges (archId, arch) = do
   unless (nextGen >= genCount) (getGeneration nextGen >>= VG.mapM_ (write #remove #add))
   unless (prevGen < 0) (getGeneration prevGen >>= VG.mapM_ (write #add #remove))
 
+-- | Iterate over all the entities matched by a 'Query'.
 forQ :: Query q -> (QueryHandle q -> System ()) -> System ()
 forQ q f = do
   VG.forM_ (q ^. #unQuery) \qh -> do
     entities <- VR.fromGrowable (qh ^. #trav . #currArch . #entities)
     VUM.iforM_ entities \idx (isValid, _) -> when isValid (f $ set #entity idx qh)
-
-------------------------------------------------------------------------------------------
-newtype Position = MkPosition Double
-  deriving (Generic, Show)
-
-derivingUnbox "Position" [t|Position -> Double|] [|\(MkPosition p) -> p|] [|MkPosition|]
-
-instance Identify Position
-
-newtype Velocity = MkVelocity Double
-  deriving (Generic, Show)
-
-derivingUnbox "Velocity" [t|Velocity -> Double|] [|\(MkVelocity v) -> v|] [|MkVelocity|]
-
-instance Identify Velocity
-
-myFunc = do
-  createArch []
-  ecs <- get
-  let posSys (q :: Query (Nab Position |&| Nab Velocity)) = forQ q $ \qh -> do
-        p <- nab @Position qh
-        v <- nab @Velocity qh
-        liftIO . putStrLn $ show p <> " " <> show v
-      mySys :: Query (Nab Position |&| Nab Velocity) -> System ()
-      mySys q = forQ q $ \qh -> do
-        p <- nab @Position qh
-        liftIO . print $ p
-      myMaker c =
-        VU.forM_ [0..1000] (\p -> void $ spawn c >>= tagged (MkPosition p) >>= tagged (MkVelocity p) >>= finish)
-  (_, (MkSystemState commands)) <- queried myMaker >>= runSystem
-  commitCommands (fromJust commands) >> queried posSys >>= runSystem
-  pure ()
-
-someFunc :: IO ()
-someFunc = putStrLn "someFunc"
