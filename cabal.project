@@ -1,6 +1,8 @@
 packages:
   recs
   recs-examples
-  ../arrayfire-haskell
+  -- ../co-log/co-log
+  -- ../co-log/co-log-core
+  -- ../arrayfire-haskell
   ../generic-lens/generic-lens
   ../generic-lens/generic-lens-core

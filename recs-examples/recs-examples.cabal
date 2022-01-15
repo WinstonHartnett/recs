@@ -80,5 +80,5 @@ executable recs-examples
       , linear
       , vector-th-unbox
     hs-source-dirs:   app
-    ghc-options:      -rtsopts -with-rtsopts=-p
+    -- ghc-options:      -rtsopts -with-rtsopts=-p
     default-language: Haskell2010

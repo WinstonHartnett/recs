@@ -56,12 +56,12 @@ myFunc = do
           >>= tagged (MkPosition emptyV3) 
           >>= tagged (MkTransform emptyM44)
           >>= finish)
-      -- posSys :: Query (Nab Position) -> System ()
-      -- posSys q = forQ q $ \qh -> do
-      --   p <- nab @Position qh
-      --   liftIO . print $ p
+      posSys :: Query (Nab Position) -> System ()
+      posSys q = forQ q $ \qh -> do
+        p <- nab @Position qh
+        liftIO . print $ p
   (_, (MkSystemState commands)) <- queried spawnSys >>= runSystem
-  commitCommands (fromJust commands)
+  -- commitCommands (fromJust commands) >> queried posSys >>= runSystem
 --   let posSys (q :: Query (Nab Position |&| Nab Velocity)) = forQ q $ \qh -> do
 --         p <- nab @Position qh
 --         v <- nab @Velocity qh
@@ -73,7 +73,7 @@ myFunc = do
 --       myMaker c =
 --         VU.forM_ [0..1000] (\p -> void $ spawn c >>= tagged (MkPosition p) >>= tagged (MkVelocity p) >>= finish)
 --   (_, (MkSystemState commands)) <- queried myMaker >>= runSystem
---   commitCommands (fromJust commands) >> queried posSys >>= runSystem
+  -- commitCommands (fromJust commands) >> queried posSys >>= runSystem
   pure ()
 
 main :: IO ()

@@ -79,7 +79,8 @@ library
     , data-default
     , data-vector-growable
     , exceptions
-    , foldl
+    -- , foldl
+    -- , co-log
     , generic-lens
     , lens
     , mtl
@@ -91,7 +92,7 @@ library
     , text
     , hashable
     , transformers
-    , arrayfire
+    -- , arrayfire
     , pvar
     , vector-algorithms
   hs-source-dirs:   src
