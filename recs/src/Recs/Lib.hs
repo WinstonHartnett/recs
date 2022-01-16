@@ -386,9 +386,10 @@ reserveEntityId eInfo = do
     else tryFrom' . subtract n <$> VR.length (eInfo ^. #meta)
 
 -- | Assert that queued entity IDs have been flushed.
-verifyFlushedEntities :: EntityInfo -> Ecs ()
-verifyFlushedEntities eInfo = do
+verifyFlushedEntities :: Ecs ()
+verifyFlushedEntities = do
   -- TODO disable in release
+  eInfo <- view #entities <$> get
   freeCursor <- atomicReadIntPVar $ eInfo ^. #freeCursor
   pendingLen <- VR.length $ eInfo ^. #pending
   unless (freeCursor == pendingLen) (error "this operation requires flushed entities")
@@ -396,9 +397,10 @@ verifyFlushedEntities eInfo = do
 -- | Free an entity ID for reuse.
 --
 --   __Safety__: not thread-safe.
-freeEntityId :: EntityInfo -> EntityId -> Ecs ()
-freeEntityId eInfo eId = do
-  verifyFlushedEntities eInfo
+freeEntityId :: EntityId -> Ecs ()
+freeEntityId eId = do
+  eInfo <- view #entities <$> get
+  verifyFlushedEntities
   -- TODO add invalid ArchRecord
   VR.push (eInfo ^. #pending) eId
   writePVar (eInfo ^. #freeCursor) =<< VR.length (eInfo ^. #pending)
@@ -556,12 +558,6 @@ instance PrimMonad Ecs where
 -----------------------------------------------------------------------------------------
 -- newtype Command = MkCommand { unCommand :: Ecs () }
 --   deriving Generic
-data Commands =
-  MkCommands
-  { entityId :: EntityId
-  , commands :: GIOVector Command
-  }
-  deriving Generic
 
 data CommandPayload =
   MkCommandPayload
@@ -573,6 +569,13 @@ data CommandPayload =
 data Command
   = MkTag CommandPayload
   | MkUntag CommandPayload
+  deriving Generic
+
+data Commands =
+  MkCommands
+  { entityId :: EntityId
+  , commands :: GIOVector Command
+  }
   deriving Generic
 
 locateEntity :: EntityId -> Ecs ArchRecord
@@ -822,24 +825,12 @@ stow qh c = do
 --           if open
 --              then loop (idx + 1)
 --              else pure $ Just idx
--- data CommandBuilder = MkCommandBuilder
---   { commands       :: Commands
---   , componentTypes :: GUIOVector TypeId
---   , components     :: GIOVector (Maybe Int -> Arch -> Ecs ())
---   }
---   deriving Generic
-data CommandBuilderState =
-  MkCommandBuilderState
-  { commands :: GIOVector (Int -> Command)
-  , entityId :: EntityId
-  }
-  deriving Generic
 
 newtype CommandBuilder a =
   MkCommandBuilder
-  { unCommandBuilder :: ReaderT CommandBuilderState System a
+  { unCommandBuilder :: ReaderT Commands System a
   }
-  deriving (Generic,Applicative,Functor,Monad,MonadIO,MonadReader CommandBuilderState)
+  deriving (Generic,Applicative,Functor,Monad,MonadIO,MonadReader Commands)
 
 command :: System EntityId -> CommandBuilder () -> System EntityId
 command eId cb = do
@@ -1141,8 +1132,8 @@ freeEntity eId = do
 processCommands :: Commands -> Ecs ()
 processCommands commands = do
   -- First locate the final archetype
-  record <- locateEntity $ commands ^. #entityId
-  rootArch <- getArch $ record ^. #archId
+  verifyFlushedEntities
+  rootArch <- getArch . view #archId =<< locateEntity (commands ^. #entityId)
   let rootTypes = IS.fromDistinctAscList . VG.toList . VG.map from $ rootArch ^. #types
   v <- VR.freeze (commands ^. #commands)
   -- 'commandMap' maps from type ID -> int set of valid 'v' indices
