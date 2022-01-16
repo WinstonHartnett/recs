@@ -46,21 +46,21 @@ emptyM44 = (V4 (V4 1.0 0.0 0.0 0.0) (V4 1.0 0.0 0.0 0.0) (V4 1.0 0.0 0.0 0.0) (V
 
 myFunc :: Ecs ()
 myFunc = do
-  createArch []
-  ecs <- get
-  let spawnSys :: Commands -> System ()
-      spawnSys c = do
-        VU.forM_ [0..100_000] (\(_ :: Word32) -> void $ spawn c 
-          >>= tagged (MkRotation emptyV3) 
-          >>= tagged (MkVelocity emptyV3)
-          >>= tagged (MkPosition emptyV3) 
-          >>= tagged (MkTransform emptyM44)
-          >>= finish)
-      posSys :: Query (Nab Position) -> System ()
-      posSys q = forQ q $ \qh -> do
-        p <- nab @Position qh
-        liftIO . print $ p
-  (_, (MkSystemState commands)) <- queried spawnSys >>= runSystem
+  -- createArch []
+  -- ecs <- get
+  -- let spawnSys :: Commands -> System ()
+  --     spawnSys c = do
+  --       VU.forM_ [0..100_000] (\(_ :: Word32) -> void $ spawn c 
+  --         >>= tagged (MkRotation emptyV3) 
+  --         >>= tagged (MkVelocity emptyV3)
+  --         >>= tagged (MkPosition emptyV3) 
+  --         >>= tagged (MkTransform emptyM44)
+  --         >>= finish)
+  --     posSys :: Query (Nab Position) -> System ()
+  --     posSys q = forQ q $ \qh -> do
+  --       p <- nab @Position qh
+  --       liftIO . print $ p
+  -- (_, (MkSystemState commands)) <- queried spawnSys >>= runSystem
   -- commitCommands (fromJust commands) >> queried posSys >>= runSystem
 --   let posSys (q :: Query (Nab Position |&| Nab Velocity)) = forQ q $ \qh -> do
 --         p <- nab @Position qh

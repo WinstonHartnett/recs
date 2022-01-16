@@ -95,5 +95,7 @@ library
     -- , arrayfire
     , pvar
     , vector-algorithms
+    , gstorable
   hs-source-dirs:   src
+  ghc-options:      -freverse-errors -fexpose-all-unfoldings -fspecialise-aggressively -fsimpl-tick-factor=200
   default-language: Haskell2010
