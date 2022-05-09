@@ -575,7 +575,7 @@ data CommandPayload =
     -- | Function that commits the transaction to the final archetype.
     --   Takes the final archetype, the target store, and the index (i.e. row) of the entity
     --   (if the store already has a corresponding row).
-  , commit :: !(Arch -> Int -> ArchMovement -> Ecs ())
+  , commit :: !(EntityId -> Int -> ArchMovement -> Ecs ())
   }
   deriving Generic
 
@@ -588,16 +588,17 @@ data CommandQueue = MkCommandQueue
 data ArchMovement =
     -- | This 'Command' results in a different archetype. A corresponding row is
     --   added in the target archetype, and the old one in the source archetype is removed.
-    MovedArchetype !ArchRecord
+    MovedArchetype
+      { src    :: !ArchRecord
+      , dest   :: !ArchRecord
+      }
     -- | This 'Command' doesn't move archetypes.
   | SameArchetype !ArchRecord
+  deriving Generic
 
 data Command
-  = MkTag
-      { typeId :: TypeId
-      , commit :: !(Arch -> Int -> ArchMovement -> Ecs ())
-      }
-  | MkUntag CommandPayload
+  = MkTag !CommandPayload
+  | MkUntag !CommandPayload
   deriving Generic
 
 -- | Deferred ECS commands.
@@ -662,14 +663,14 @@ emptyArch = do
 --
 --     * the new 'ArchRecord' must be immediately registered with
 --       'EntityInfo'
-allocateEntity :: Arch -> EntityId -> V.Vector (Arch -> Int -> ArchMovement -> Ecs ()) -> Ecs ArchRecord
+allocateEntity :: Arch -> EntityId -> V.Vector (Arch -> EntityId -> Int -> ArchMovement -> Ecs ()) -> Ecs ArchRecord
 allocateEntity a eId commitHooks = do
   idx <- VR.length (a ^. #entities) <* VR.push (a ^. #entities) eId
   let archRecord = MkArchRecord
         { archId = a ^. #archId
         , idx    = idx
         }
-  V.forM_ commitHooks \commitFn -> commitFn a idx (MovedArchetype archRecord)
+  V.forM_ commitHooks \commitFn -> commitFn a eId idx (MovedArchetype archRecord)
   pure archRecord
 
 allocateEntityIntoEmpty :: EntityId -> Ecs ArchRecord
@@ -725,10 +726,14 @@ instance {-# OVERLAPPABLE #-}Typeable t => Identify t
 class (Storage (Layout c), Identify c) => Component (c :: Type) where
   type Layout c
 
+getArchStoreByIdx' :: Arch -> Int -> Maybe Any
+getArchStoreByIdx' a idx = (a ^. #components) VG.!? idx
+
+getArchStoreByIdx :: forall c. Component c => Arch -> Int -> Maybe (Layout c)
+getArchStoreByIdx a idx = unsafeCoerce @Any @(Layout c) <$> getArchStoreByIdx' a idx
+
 getArchStore' :: Arch -> TypeId -> Maybe Any
-getArchStore' a tId = do
-  idx <- findStoreIdx tId a
-  (a ^. #components) VG.!? idx
+getArchStore' a tId = getArchStoreByIdx' a =<< findStoreIdx tId a
 
 getArchStore :: forall c. Component c => Arch -> Ecs (Maybe (Layout c))
 getArchStore a = do
@@ -889,39 +894,73 @@ newtype CommandBuilder a =
   deriving (Generic,Applicative,Functor,Monad,MonadIO
            ,MonadState CommandQueue)
 
+insertionCommit :: Component c => Any -> EntityId -> ArchMovement -> Ecs ()
+insertionCommit component eId movement = do
+
+  undefined
+
 -- | Add a component to an Entity.
 tagged :: forall c. Component c => c -> CommandBuilder ()
 tagged c = do
   ident <- MkCommandBuilder $ lift $ lift $ identified @c -- TODO Ugly!
   modify \cq ->
-    let tagCommand = MkTag
+    let tagCommand = MkTag $ MkCommandPayload -- TODO replace w/ insertionCommit + removalCommit
             { typeId = ident
-            , commit = \arch storeIdx movement -> -- TODO Verify that this doesn't allocate
-                -- let targetStore = unsafeCoerce @Any @(Layout c) $ (arch ^. #components) VG.! storeIdx
-                let targetStore = getArchStore @c arch
-                in undefined
-
-                    -- MovedArchetype -> storageInsert targetStore c
-                    -- SameArchetype (MkArchRecord { idx }) -> storageModify targetStore idx c
+            , commit = \eId storeIdx movement -> do
+                -- TODO Make this not allocate a closure
+                case movement of
+                  MovedArchetype { src, dest } -> do
+                    destStore <- do
+                      arch <- getArch (src ^. #archId)
+                      pure $ fromJust $ getArchStoreByIdx arch storeIdx
+                    srcStore <- do
+                      arch <- getArch (dest ^. #archId)
+                      pure $ fromJust $ getArchStoreByIdx arch storeIdx
+                    -- destStore <- fromJust <$> (getArchStoreByIdx <$> getArch (src ^. #archId) <*> pure storeIdx)
+                    -- srcStore <- fromJust <$> (getArchStoreByIdx <$> getArch (dest ^. #archId) <*> pure storeIdx)
+                    storageInsert destStore eId c
+                    storageRemove @(Layout c) srcStore eId (dest ^. #idx)
+                  SameArchetype (MkArchRecord { idx }) -> undefined
             }
     in undefined
 
 -- | Remove a component from an Entity.
-untagged :: forall c. Component c => c -> CommandBuilder ()
-untagged = undefined
+untagged :: forall c. Component c => CommandBuilder ()
+untagged = do
+  ident <- MkCommandBuilder $ lift $ lift $ identified @c
+  modify \cq ->
+    let tagCommand = MkTag $ MkCommandPayload
+          { typeId = ident
+          , commit = \eId storeIdx movement -> do
+              undefined
+              -- let targetStore = fromJust $ getArchStoreByIdx @c arch storeIdx
+              -- case movement of
+                -- MovedArchetype (MkArchRecord { idx }) -> undefined
+          }
+    in undefined
+  undefined
 
--- | Spawn a new Entity, then apply the given commands to it.
-spawn :: Commands -> CommandBuilder () -> System EntityId
-spawn c cb = do
-  ecs <- lift $ get
-  newEntityId <- lift . reserveEntityId $ ecs ^. #entities
-  (_, commandQueue) <- unCommandBuilder cb `runStateT` MkCommandQueue newEntityId SQ.empty
+-- | Despawn an Entity.
+despawn :: Commands -> EntityId -> System ()
+despawn = undefined
+
+-- | Apply commands to a specific Entity.
+onEntity :: Commands -> EntityId -> CommandBuilder () -> System ()
+onEntity c eId cb = do
+  (_, commandQueue) <- unCommandBuilder cb `runStateT` MkCommandQueue eId SQ.empty
   modify \systemState ->
     MkSystemState
       { commands = Just $
           let commands = fromMaybe (MkCommands SQ.empty) (systemState ^. #commands)
-          in MkCommands { queue = (commands ^. #queue) SQ.|> commandQueue }
+          in MkCommands { queue = (commands ^. #queue) SQ.|> commandQueue}
       }
+
+-- | Spawn a new Entity, then apply the given commands to it.
+spawn :: Commands -> CommandBuilder () -> System EntityId
+spawn c cb = do
+  ecs <- lift get
+  newEntityId <- lift . reserveEntityId $ ecs ^. #entities
+  onEntity c newEntityId cb
   pure newEntityId
 
 -- tagged c = lift $ do
