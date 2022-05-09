@@ -26,13 +26,14 @@ import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Control.Monad.Trans.Maybe
 
+import qualified Data.Sequence as SQ
 import           Data.Coerce
 import           Data.Default
 import           Data.Either                   (fromRight)
 import           Data.Generics.Labels
 import qualified Data.HashMap.Internal         as HM
 import           Data.HashMap.Internal         (Hash)
-import qualified Data.HashMap.Strict           as HM
+import qualified Data.HashMap.Strict           as HMS
 import           Data.Hashable
 import           Data.IORef
 import qualified Data.IntMap                   as IM
@@ -260,8 +261,8 @@ newtype SomeQuery =
 -- | A query iterator.
 data QueryHandle q =
   MkQueryHandle
-  { -- | Index of current entity.
-    entity :: Int
+  { -- | Index of current entity and its ID.
+    entity   :: (EntityId, Int)
     -- | Points to information about the currently iterated archetype.
   , trav   :: QueryTraversal
   }
@@ -322,8 +323,8 @@ data ArchSearch
 
 data ArchRecord =
   MkArchRecord
-  { archId :: ArchId
-  , idx    :: Int
+  { archId :: !ArchId
+  , idx    :: !Int
   }
   deriving (Generic,Show)
 
@@ -362,7 +363,7 @@ derivingUnbox "ArchRecord" [t|ArchRecord -> (ArchId, Int)|] [|\(MkArchRecord a i
 --           |            ^                ^
 --           0        freeCursor     pending length@
 --
---   == Credit
+--   == Attribution
 --
 --   Based on [Bevy's entity ID reservation system](github.com/bevyengine/bevy/blob/main/crates/bevy_ecs/src/entity/mod.rs).
 data EntityInfo =
@@ -370,14 +371,14 @@ data EntityInfo =
   { meta       :: GUIOVector ArchRecord
   , pending    :: GUIOVector EntityId
   , freeCursor :: PVar Int RealWorld
+  , len        :: PVar Int RealWorld
   }
 -- TODO Find out what len is supposed to do?
--- , len        :: PVar Int RealWorld
   deriving Generic
 
 -- | Concurrently reserve a new entity ID.
 --
---   __Safety__: thread-safe.
+--   __Safety:__ thread-safe.
 reserveEntityId :: EntityInfo -> Ecs EntityId
 reserveEntityId eInfo = do
   n <- atomicSubIntPVar (eInfo ^. #freeCursor) 1
@@ -396,55 +397,62 @@ verifyFlushedEntities = do
 
 -- | Free an entity ID for reuse.
 --
---   __Safety__: not thread-safe.
+--   __Safety:__ not thread-safe.
 freeEntityId :: EntityId -> Ecs ()
 freeEntityId eId = do
   eInfo <- view #entities <$> get
   verifyFlushedEntities
   -- TODO add invalid ArchRecord
-  VR.push (eInfo ^. #pending) eId
-  writePVar (eInfo ^. #freeCursor) =<< VR.length (eInfo ^. #pending)
+  let pending = eInfo ^. #pending
+  VR.push pending eId
+  writePVar (eInfo ^. #freeCursor) =<< VR.length pending
 
 -- | Flush pending entity IDs from the queue.
+--   Adds new 'ArchRecord's.
 --
 --   __Safety__: not thread-safe.
 flushEntities :: EntityInfo -> Ecs ()
-flushEntities entityInfo = do
+flushEntities eInfo = do
   emptyArch' <- emptyArch
 
+  let len        = eInfo ^. #len
+      pending    = eInfo ^. #pending
+      meta       = eInfo ^. #meta
+      freeCursor = eInfo ^. #freeCursor
+
   newFreeCursor <- do
-    currFreeCursor <- readPVar $ entityInfo ^. #freeCursor
+    currFreeCursor <- readPVar freeCursor
     if currFreeCursor >= 0
       then pure currFreeCursor
       else do
         -- Allocate new IDs in the entity meta vector.
-        oldMetaLen <- VR.length $ entityInfo ^. #meta
-        -- modifyPVar_ (entityInfo ^. #len) (+ (-currFreeCursor))
+        oldMetaLen <- VR.length meta
+        modifyPVar_ len (+ (-currFreeCursor))
         VU.forM_ [(-currFreeCursor) .. (oldMetaLen + (-currFreeCursor))] \i ->
           -- TODO Would be more efficient to resize the array once and write over
-          VR.push (entityInfo ^. #meta) =<< allocateEntity emptyArch' (tryFrom' i)
-        writePVar (entityInfo ^. #freeCursor) 0
+          VR.push meta =<< allocateEntityIntoEmpty (tryFrom' i)
+        writePVar freeCursor 0
         pure 0
 
-  pendingLen <- VR.length (entityInfo ^. #pending)
-  -- modifyPVar_ (entityInfo ^. #len) (+ (pendingLen - newFreeCursor))
-  VU.forM_ [newFreeCursor .. pendingLen] \i -> VR.write (entityInfo ^. #meta) i
-    =<< allocateEntity emptyArch' (tryFrom' i)
+  pendingLen <- VR.length pending
+  modifyPVar_ len (+ (pendingLen - newFreeCursor))
+  VU.forM_ [newFreeCursor .. pendingLen] \i -> VR.write meta i
+    =<< allocateEntityIntoEmpty (tryFrom' i)
 
 instance {-# OVERLAPPING #-}Default (IO EntityInfo) where
   def = do
     meta <- VR.new
     pending <- VR.new
     freeCursor <- newPVar 0
-    -- len        <- newPVar 0
+    len        <- newPVar 0
     pure
       $ MkEntityInfo
       { meta       = meta
       , pending    = pending
       , freeCursor = freeCursor
+      , len = len
       }
 
-            -- , len = len
 -- | Reified 'Storage' typeclass dictionary.
 --   Used to manipulate untyped stores at runtime.
 data StorageDict =
@@ -453,7 +461,7 @@ data StorageDict =
   , _storageRemove :: Any -> Int -> Ecs ()
   , _storageLookup :: Any -> Int -> Ecs Any
   , _storageModify :: Any -> Int -> Any -> Ecs ()
-  , _storageInit   :: Ecs Any
+  , _storageInit   :: !(Ecs Any)
   }
   deriving Generic
 
@@ -461,13 +469,13 @@ data StorageDict =
 mkStorageDict :: forall a. Storage a => StorageDict
 mkStorageDict =
   MkStorageDict
-  { _storageInsert = unsafeCoerce @(a -> Elem a -> Ecs ()) @(Any -> Any -> Ecs ())
+  { _storageInsert = unsafeCoerce @(a -> EntityId -> Elem a -> Ecs ()) @(Any -> Any -> Ecs ())
       $ storageInsert @a
-  , _storageRemove = unsafeCoerce @(a -> Int -> Ecs ()) @(Any -> Int -> Ecs ())
+  , _storageRemove = unsafeCoerce @(a -> EntityId -> Int -> Ecs ()) @(Any -> Int -> Ecs ())
       $ storageRemove @a
-  , _storageLookup = unsafeCoerce @(a -> Int -> Ecs (Elem a)) @(Any -> Int -> Ecs Any)
+  , _storageLookup = unsafeCoerce @(a -> EntityId -> Int -> Ecs (Elem a)) @(Any -> Int -> Ecs Any)
       $ storageLookup @a
-  , _storageModify = unsafeCoerce @(a -> Int -> Elem a -> Ecs ())
+  , _storageModify = unsafeCoerce @(a -> EntityId -> Int -> Elem a -> Ecs ())
       @(Any -> Int -> Any -> Ecs ())
       $ storageModify @a
   , _storageInit   = unsafeCoerce @(Ecs a) @(Ecs Any) $ storageInit @a
@@ -544,10 +552,15 @@ instance {-# OVERLAPPING #-}Default (IO World) where
 class Storage a where
   type Elem a
 
-  storageInsert :: a -> Elem a -> Ecs ()
-  storageRemove :: a -> Int -> Ecs ()
-  storageLookup :: a -> Int -> Ecs (Elem a)
-  storageModify :: a -> Int -> Elem a -> Ecs ()
+  -- | Add a new row with a given entity.
+  storageInsert :: a -> EntityId -> Elem a -> Ecs ()
+  -- | Remove a row at the given index.
+  storageRemove :: a -> EntityId -> Int -> Ecs ()
+  -- | Lookup the row at the given index.
+  storageLookup :: a -> EntityId -> Int -> Ecs (Elem a)
+  -- | Write a new element to the given index.
+  storageModify :: a -> EntityId -> Int -> Elem a -> Ecs ()
+  -- | Instantiate a collection of the given type.
   storageInit :: Ecs a
 
 instance PrimMonad Ecs where
@@ -556,25 +569,44 @@ instance PrimMonad Ecs where
   primitive = MkEcs . lift . IO
 
 -----------------------------------------------------------------------------------------
--- newtype Command = MkCommand { unCommand :: Ecs () }
---   deriving Generic
-
 data CommandPayload =
   MkCommandPayload
-  { typeId :: TypeId
-  , commit :: Arch -> Int -> Ecs ()
+  { typeId :: !TypeId
+    -- | Function that commits the transaction to the final archetype.
+    --   Takes the final archetype, the target store, and the index (i.e. row) of the entity
+    --   (if the store already has a corresponding row).
+  , commit :: !(Arch -> Int -> ArchMovement -> Ecs ())
   }
   deriving Generic
 
+data CommandQueue = MkCommandQueue
+  { entityId :: !EntityId
+  , queue    :: SQ.Seq Command
+  }
+  deriving Generic
+
+data ArchMovement =
+    -- | This 'Command' results in a different archetype. A corresponding row is
+    --   added in the target archetype, and the old one in the source archetype is removed.
+    MovedArchetype !ArchRecord
+    -- | This 'Command' doesn't move archetypes.
+  | SameArchetype !ArchRecord
+
 data Command
-  = MkTag CommandPayload
+  = MkTag
+      { typeId :: TypeId
+      , commit :: !(Arch -> Int -> ArchMovement -> Ecs ())
+      }
   | MkUntag CommandPayload
   deriving Generic
 
+-- | Deferred ECS commands.
 data Commands =
   MkCommands
-  { entityId :: EntityId
-  , commands :: GIOVector Command
+  {
+  -- { entityId :: EntityId
+  -- , commands :: V.Vector Command
+  queue    :: SQ.Seq CommandQueue
   }
   deriving Generic
 
@@ -622,17 +654,41 @@ emptyArch = do
   ecs <- get
   VR.read (ecs ^. #archetypes) 0
 
--- | Allocate a new entity in an archetype.
-allocateEntity :: Arch -> EntityId -> Ecs ArchRecord
-allocateEntity a eId = do
-  idx <- VR.length (a ^. #entities)
-  VR.push (a ^. #entities) eId
-  -- TODO push to meta?
-  pure
-    $ MkArchRecord
-    { archId = a ^. #archId
-    , idx    = idx
-    }
+-- | Allocate a new entity into an archetype and updates the requisite stores to match.
+--
+--   __Safety:__
+--
+--     * not thread-safe
+--
+--     * the new 'ArchRecord' must be immediately registered with
+--       'EntityInfo'
+allocateEntity :: Arch -> EntityId -> V.Vector (Arch -> Int -> ArchMovement -> Ecs ()) -> Ecs ArchRecord
+allocateEntity a eId commitHooks = do
+  idx <- VR.length (a ^. #entities) <* VR.push (a ^. #entities) eId
+  let archRecord = MkArchRecord
+        { archId = a ^. #archId
+        , idx    = idx
+        }
+  V.forM_ commitHooks \commitFn -> commitFn a idx (MovedArchetype archRecord)
+  pure archRecord
+
+allocateEntityIntoEmpty :: EntityId -> Ecs ArchRecord
+allocateEntityIntoEmpty eId = do
+  emptyArch' <- emptyArch
+  allocateEntity emptyArch' eId []
+
+-- -- | Deallocate an entity from an Archetype, given its index in the entities list.
+-- --   This swap-removes the target index.
+-- deallocateEntity :: Arch -> Int -> Ecs ()
+-- deallocateEntity a record = do
+--   let entities = a ^. #entities
+--   n <- VR.pop entities
+--   case n of
+--     Just eId -> undefined
+--     Nothing -> undefined
+--   -- case VR.pop entities of
+--   --   Just eId -> undefined
+--   undefined
 
 -----------------------------------------------------------------------------------------
 derivingUnbox "Edge" [t|Edge -> (ArchId, ArchId)|] [|\(MkEdge a r)
@@ -669,9 +725,20 @@ instance {-# OVERLAPPABLE #-}Typeable t => Identify t
 class (Storage (Layout c), Identify c) => Component (c :: Type) where
   type Layout c
 
+getArchStore' :: Arch -> TypeId -> Maybe Any
+getArchStore' a tId = do
+  idx <- findStoreIdx tId a
+  (a ^. #components) VG.!? idx
+
+getArchStore :: forall c. Component c => Arch -> Ecs (Maybe (Layout c))
+getArchStore a = do
+  ident <- identified @c
+  pure $ (unsafeCoerce @Any @(Layout c)) <$> getArchStore' a ident
+
 reserveAtomic :: Lens' World (IORef c) -> (c -> (c, b)) -> Ecs b
 reserveAtomic l f = liftIO . (`atomicModifyIORef` f) . view l =<< get
 
+reserveTypeId :: Ecs TypeId
 reserveTypeId =
   reserveAtomic ( #types . #typeCtr) (\t@(MkTypeId i) -> (MkTypeId $ i + 1, t))
 
@@ -702,17 +769,18 @@ instance Storage (GIOVector c) where
   type Elem (GIOVector c) = c
 
   -- type Idx (GIOVector c) = Int
-  storageInsert = VR.push
+  storageInsert v eId e = VR.push v e
 
-  storageRemove v idx = do
+  storageRemove v eId idx = do
+    -- Moves the last element to fill the gap left by the 'idx' removal
     n <- VR.pop v
     case n of
       Just p  -> VR.write v idx p
       Nothing -> pure ()
 
-  storageLookup = VR.read
+  storageLookup v eId idx = VR.read v idx
 
-  storageModify = VR.write
+  storageModify v eId idx = VR.write v idx
 
   storageInit = VR.new
 
@@ -720,17 +788,17 @@ instance VU.Unbox c => Storage (GUIOVector c) where
   type Elem (GUIOVector c) = c
 
   -- type Idx (GUIOVector c) = Int
-  storageInsert = VR.push
+  storageInsert v eId e = VR.push v e
 
-  storageRemove v idx = do
+  storageRemove v eId idx = do
     n <- VR.pop v
     case n of
       Just p  -> VR.write v idx p
       Nothing -> pure ()
 
-  storageLookup = VR.read
+  storageLookup v eId idx = VR.read v idx
 
-  storageModify = VR.write
+  storageModify v eId idx = VR.write v idx
 
   storageInit = VR.new
 
@@ -757,7 +825,10 @@ class Queryable q where
 instance DesugarQuery q => Queryable (Query q) where
   query = do
     res <- desugarQuery @q >>= runQuery
-    pure . MkQuery . V.map (MkQueryHandle 0) . unSomeQuery $ res
+    fmap MkQuery $ V.mapM (\qt -> do
+      -- let a = (qt ^. #currArch . #components)
+      undefined
+      ) . unSomeQuery $ res
 
 -- TODO loosen superclass bound
 instance Component c => Queryable (Global c) where
@@ -772,9 +843,6 @@ instance Queryable (Local c) where
 instance Queryable Commands where
   query = undefined
 
-  -- query = do
-  --   v <- VR.new
-  --   pure $ MkCommands v
 -----------------------------------------------------------------------------------------
 -- | Get the return type of a function.
 type family Returns s where
@@ -800,7 +868,7 @@ nab :: forall c q qi.
     -> System c
 nab qh = do
   targetStore <- lift $ getStore @c qh
-  lift $ storageLookup targetStore (qh ^. #entity)
+  lift $ storageLookup targetStore (qh ^. #entity . _1) (qh ^. #entity . _2)
 
 -----------------------------------------------------------------------------------------
 stow :: forall c q qi.
@@ -810,42 +878,51 @@ stow :: forall c q qi.
      -> System ()
 stow qh c = do
   targetStore <- lift $ getStore @c qh
-  lift $ storageModify targetStore (qh ^. #entity) c
+  lift $ storageModify targetStore (qh ^. #entity . _1) (qh ^. #entity . _2) c
 
 -----------------------------------------------------------------------------------------
 
--- findNextAvailEntity :: VUM.IOVector (Bool, EntityId) -> Ecs (Maybe Int)
--- findNextAvailEntity vum = loop 0
---   where
---     vumLen = VUM.length vum
---     loop idx
---       | idx >= vumLen = pure Nothing
---       | otherwise = do
---           (open, _) <- VUM.read vum idx
---           if open
---              then loop (idx + 1)
---              else pure $ Just idx
-
 newtype CommandBuilder a =
   MkCommandBuilder
-  { unCommandBuilder :: ReaderT Commands System a
+  { unCommandBuilder :: StateT CommandQueue System a
   }
-  deriving (Generic,Applicative,Functor,Monad,MonadIO,MonadReader Commands)
+  deriving (Generic,Applicative,Functor,Monad,MonadIO
+           ,MonadState CommandQueue)
 
-command :: System EntityId -> CommandBuilder () -> System EntityId
-command eId cb = do
-  -- modify (set #commands (Just c))
-  -- eId' <- eId
-  undefined
-
-  -- runReaderT
-  --   (unCommandBuilder cb)
-  --   (MkCommandBuilderState
-  --     { commands = c
-  --     , entityId = eId'
-  --     })
+-- | Add a component to an Entity.
 tagged :: forall c. Component c => c -> CommandBuilder ()
-tagged = undefined
+tagged c = do
+  ident <- MkCommandBuilder $ lift $ lift $ identified @c -- TODO Ugly!
+  modify \cq ->
+    let tagCommand = MkTag
+            { typeId = ident
+            , commit = \arch storeIdx movement -> -- TODO Verify that this doesn't allocate
+                -- let targetStore = unsafeCoerce @Any @(Layout c) $ (arch ^. #components) VG.! storeIdx
+                let targetStore = getArchStore @c arch
+                in undefined
+
+                    -- MovedArchetype -> storageInsert targetStore c
+                    -- SameArchetype (MkArchRecord { idx }) -> storageModify targetStore idx c
+            }
+    in undefined
+
+-- | Remove a component from an Entity.
+untagged :: forall c. Component c => c -> CommandBuilder ()
+untagged = undefined
+
+-- | Spawn a new Entity, then apply the given commands to it.
+spawn :: Commands -> CommandBuilder () -> System EntityId
+spawn c cb = do
+  ecs <- lift $ get
+  newEntityId <- lift . reserveEntityId $ ecs ^. #entities
+  (_, commandQueue) <- unCommandBuilder cb `runStateT` MkCommandQueue newEntityId SQ.empty
+  modify \systemState ->
+    MkSystemState
+      { commands = Just $
+          let commands = fromMaybe (MkCommands SQ.empty) (systemState ^. #commands)
+          in MkCommands { queue = (commands ^. #queue) SQ.|> commandQueue }
+      }
+  pure newEntityId
 
 -- tagged c = lift $ do
 --   ident <- identified @c
@@ -934,13 +1011,14 @@ instance Component c => DesugarQuery (With c) where
 --   mapping a type to an archetype's matching component store.
 type QueryRelevant = ReaderT Arch (MaybeT Ecs) (IM.IntMap Any)
 
+-- | Locate the column corresponding to the given type in an archetype's stores.
 findStoreIdx :: TypeId -> Arch -> Maybe Int
 findStoreIdx tId = VU.findIndex (== tId) . view #types
 
 basicHas :: QuerySubject -> QueryRelevant
 basicHas qs = do
   a <- ask
-  let targetStore tId = ((a ^. #components) VG.!) <$> findStoreIdx tId a
+  let targetStore tId = getArchStore' a tId
   case qs of
     SubMaybe tId -> pure . maybe IM.empty (IM.singleton (from tId)) $ targetStore tId
     SubBase tId  -> maybe mzero (pure . IM.singleton (from tId)) $ targetStore tId
@@ -1052,11 +1130,12 @@ createArch tIds = do
     entities' <- VR.new
     edges' <- do
       edgesLen <- liftIO $ from <$> readIORef (ecs ^. #types . #typeCtr)
-      VUM.replicate edgesLen (MkEdge
-                              { add    = Nothing
-                              , remove = Nothing
-                              })
-        >>= VR.toGrowable
+      replicated <- VUM.replicate edgesLen
+        (MkEdge
+         { add    = Nothing
+         , remove = Nothing
+         })
+      VR.toGrowable replicated
     components' <- VG.forM (VG.convert tIds) \tId
       -> ((ecs ^. #types . #storageDicts) VG.! from tId) ^. #_storageInit
 
@@ -1092,13 +1171,15 @@ populateEdges arch = do
       nextGen = thisGen + 1
       prevGen = thisGen - 1
       archId = arch ^. #archId
-      getGeneration gen =
-        (ecs ^. #generations) `VR.read` gen
-        >>= VR.freeze
-        >>= VG.mapM (over (mapped . _1) (MkArchId . fromRight undefined . tryFrom)
-                     . traverseOf _2 (((ecs ^. #archetypes) `VR.read`) . from))
-        . VG.indexed
-        . (VG.convert @_ @_ @V.Vector)
+      getGeneration gen = do
+        frozenGen <- VR.freeze =<< (ecs ^. #generations) `VR.read` gen
+        let readArchetypes   = traverseOf _2 ((view #archetypes ecs `VR.read`) . from)
+            convertToArchIds =
+              over (mapped . _1) (MkArchId . fromRight undefined . tryFrom)
+        VG.mapM (convertToArchIds . readArchetypes)
+          . VG.indexed
+          . VG.convert @_ @_ @V.Vector
+          $ frozenGen
 
   -- | Write new edge information
   --   'thisDirection' is the edge direction to modify for 'arch'.
@@ -1117,6 +1198,7 @@ populateEdges arch = do
 --   VG.forM_ (q ^. #unQuery) \qh -> do
 --     entities <- VR.fromGrowable (qh ^. #trav . #currArch . #entities)
 --     VUM.iforM_ entities \idx (isValid, _) -> when isValid (f $ set #entity idx qh)
+
 freeEntity :: EntityId -> Ecs ()
 freeEntity eId = do
   ecs <- get
@@ -1129,46 +1211,52 @@ freeEntity eId = do
        in removeFunc storage (record ^. #idx)
 
 -- | Locates these Commands' target archetype and commits.
-processCommands :: Commands -> Ecs ()
-processCommands commands = do
-  -- First locate the final archetype
-  verifyFlushedEntities
-  rootArch <- getArch . view #archId =<< locateEntity (commands ^. #entityId)
-  let rootTypes = IS.fromDistinctAscList . VG.toList . VG.map from $ rootArch ^. #types
-  v <- VR.freeze (commands ^. #commands)
-  -- 'commandMap' maps from type ID -> int set of valid 'v' indices
-  let commandMap     = VG.foldl' f IM.empty . VG.indexed $ v
-      (tags, untags) =
-        VG.partition (\case
-                        MkTag _   -> True
-                        MkUntag _ -> False)
-        . VG.ifilter (\idx command ->
-          let isInRootTypes = case command of
-                                MkTag _ -> True
-                                c@(MkUntag _) -> commandTId c `IS.member` rootTypes
-              isValid = case IM.lookup (commandTId command) commandMap of
-                            Just is -> IS.member idx is
-                            Nothing -> False
-            in isInRootTypes || isValid)
-        $ v
-  -- Process commands on target archetype
-  targetArch <- traverseArch rootArch (Remove . VG.convert $ VG.map commandTId' untags)
-    >>= (`traverseArch` (Add . VG.convert $ VG.map commandTId' tags))
-  newRecord <- allocateEntity targetArch (commands ^. #entityId)
-  let commitCommands c =
-        VG.forM_ c \command -> (getPayload command ^. #commit) targetArch (newRecord ^. #idx)
-  commitCommands tags
-  commitCommands untags
-  where
-    f m (idx, command) =
-      let alterFunc = case command of
-            MkTag p   -> maybe (Just $ IS.singleton idx) (Just . IS.insert idx)
-            MkUntag p -> const (Just $ IS.singleton idx)
-      in IM.alter alterFunc (commandTId command) m
-    getPayload = \case
-      MkTag p -> p
-      MkUntag p -> p
-    commandTId' = \case
-      MkTag (MkCommandPayload {typeId})   -> typeId
-      MkUntag (MkCommandPayload {typeId}) -> typeId
-    commandTId         = from . commandTId'
+-- processCommands :: Commands -> Ecs ()
+-- processCommands commands = do
+--   -- First locate the final archetype
+--   verifyFlushedEntities
+--   rootArch <- getArch . view #archId =<< locateEntity (commands ^. #entityId)
+--   let rootTypes = IS.fromDistinctAscList . VG.toList . VG.map from $ rootArch ^. #types
+--       v         = commands ^. #commands
+--   -- v <- VR.freeze (commands ^. #commands)
+--   -- 'commandMap' maps from type ID -> int set of valid 'v' indices
+--   let commandMap     = VG.foldl' f IM.empty . VG.indexed $ v
+--       (tags, untags) =
+--         VG.partition (\case
+--                         MkTag _   -> True
+--                         MkUntag _ -> False)
+--         . VG.ifilter
+--         (\idx command
+--          -> let isInRootTypes = case command of
+--                   MkTag _       -> True
+--                   c@(MkUntag _) -> commandTId c `IS.member` rootTypes
+--                 isValid       = case IM.lookup (commandTId command) commandMap of
+--                   Just is -> IS.member idx is
+--                   Nothing -> False
+--             in isInRootTypes || isValid)
+--         $ v
+--   -- Process commands on target archetype
+--   targetArch <- do
+--     r <- traverseArch rootArch (Remove . VG.convert $ VG.map commandTId' untags)
+--     traverseArch r (Add . VG.convert $ VG.map commandTId' tags)
+--   newRecord <- allocateEntity targetArch (commands ^. #entityId)
+--   let commitCommands c = VG.forM_ c \command -> (getPayload command ^. #commit) targetArch
+--         (newRecord ^. #idx)
+--   commitCommands tags
+--   commitCommands untags
+--   where
+--     f m (idx, command) =
+--       let alterFunc = case command of
+--             MkTag p   -> maybe (Just $ IS.singleton idx) (Just . IS.insert idx)
+--             MkUntag p -> const (Just $ IS.singleton idx)
+--       in IM.alter alterFunc (commandTId command) m
+
+--     getPayload         = \case
+--       MkTag p   -> p
+--       MkUntag p -> p
+
+--     commandTId'        = \case
+--       MkTag (MkCommandPayload {typeId})   -> typeId
+--       MkUntag (MkCommandPayload {typeId}) -> typeId
+
+--     commandTId         = from . commandTId'

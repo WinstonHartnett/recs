@@ -44,6 +44,21 @@ emptyV3 = V3 1.0 0.0 0.0
 emptyM44 :: M44 Float
 emptyM44 = (V4 (V4 1.0 0.0 0.0 0.0) (V4 1.0 0.0 0.0 0.0) (V4 1.0 0.0 0.0 0.0) (V4 1.0 0.0 0.0 0.0))
 
+mySpawnF :: System EntityId
+mySpawnF = spawn undefined do
+  tagged $ MkRotation emptyV3
+  tagged $ MkVelocity emptyV3
+  tagged $ MkPosition emptyV3
+  tagged $ MkTransform emptyM44
+
+-- Goal
+--
+-- spawn c do
+--   tagged $ MkRotation emptyV3
+--   tagged $ MkVelocity emptyV3
+--   tagged $ MkPosition emptyV3
+--   tagged $ MkTransform emptyM44
+
 myFunc :: Ecs ()
 myFunc = do
   -- createArch []
