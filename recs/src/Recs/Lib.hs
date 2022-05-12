@@ -457,10 +457,10 @@ instance {-# OVERLAPPING #-}Default (IO EntityInfo) where
 --   Used to manipulate untyped stores at runtime.
 data StorageDict =
   MkStorageDict
-  { _storageInsert :: Any -> Any -> Ecs ()
-  , _storageRemove :: Any -> Int -> Ecs ()
-  , _storageLookup :: Any -> Int -> Ecs Any
-  , _storageModify :: Any -> Int -> Any -> Ecs ()
+  { _storageInsert :: Any -> EntityId -> Any -> Ecs ()
+  , _storageRemove :: Any -> EntityId -> Int -> Ecs ()
+  , _storageLookup :: Any -> EntityId -> Int -> Ecs Any
+  , _storageModify :: Any -> EntityId -> Int -> Any -> Ecs ()
   , _storageInit   :: !(Ecs Any)
   }
   deriving Generic
@@ -469,14 +469,14 @@ data StorageDict =
 mkStorageDict :: forall a. Storage a => StorageDict
 mkStorageDict =
   MkStorageDict
-  { _storageInsert = unsafeCoerce @(a -> EntityId -> Elem a -> Ecs ()) @(Any -> Any -> Ecs ())
+  { _storageInsert = unsafeCoerce @(a -> EntityId -> Elem a -> Ecs ()) @(Any -> EntityId -> Any -> Ecs ())
       $ storageInsert @a
-  , _storageRemove = unsafeCoerce @(a -> EntityId -> Int -> Ecs ()) @(Any -> Int -> Ecs ())
+  , _storageRemove = unsafeCoerce @(a -> EntityId -> Int -> Ecs ()) @(Any -> EntityId -> Int -> Ecs ())
       $ storageRemove @a
-  , _storageLookup = unsafeCoerce @(a -> EntityId -> Int -> Ecs (Elem a)) @(Any -> Int -> Ecs Any)
+  , _storageLookup = unsafeCoerce @(a -> EntityId -> Int -> Ecs (Elem a)) @(Any -> EntityId -> Int -> Ecs Any)
       $ storageLookup @a
   , _storageModify = unsafeCoerce @(a -> EntityId -> Int -> Elem a -> Ecs ())
-      @(Any -> Int -> Any -> Ecs ())
+      @(Any -> EntityId -> Int -> Any -> Ecs ())
       $ storageModify @a
   , _storageInit   = unsafeCoerce @(Ecs a) @(Ecs Any) $ storageInit @a
   }
@@ -516,7 +516,7 @@ instance Default QueryEntry where
 
 newtype Ecs a =
   MkEcs
-  { unEcs :: StateT World IO a
+  { unEcs :: StateT World IO a -- TODO This really shouldn't be a StateT
   }
   deriving (Functor,Applicative,Monad,MonadState World,MonadIO,MonadThrow,MonadCatch
            ,MonadMask)
@@ -555,6 +555,10 @@ class Storage a where
   -- | Add a new row with a given entity.
   storageInsert :: a -> EntityId -> Elem a -> Ecs ()
   -- | Remove a row at the given index.
+  --   This performs a swap-remove on the store-level with the last element.
+  --
+  --   __Safety:__ the corresponding archetype entity entry must be immediately updated
+  --   to reflect the swap-remove.
   storageRemove :: a -> EntityId -> Int -> Ecs ()
   -- | Lookup the row at the given index.
   storageLookup :: a -> EntityId -> Int -> Ecs (Elem a)
@@ -575,7 +579,7 @@ data CommandPayload =
     -- | Function that commits the transaction to the final archetype.
     --   Takes the final archetype, the target store, and the index (i.e. row) of the entity
     --   (if the store already has a corresponding row).
-  , commit :: !(EntityId -> Int -> ArchMovement -> Ecs ())
+  , commit :: !(EntityId -> ArchMovement -> Ecs ())
   }
   deriving Generic
 
@@ -670,7 +674,7 @@ allocateEntity a eId commitHooks = do
         { archId = a ^. #archId
         , idx    = idx
         }
-  V.forM_ commitHooks \commitFn -> commitFn a eId idx (MovedArchetype archRecord)
+  V.forM_ commitHooks \commitFn -> commitFn a eId idx (MovedArchetype undefined undefined)
   pure archRecord
 
 allocateEntityIntoEmpty :: EntityId -> Ecs ArchRecord
@@ -678,18 +682,15 @@ allocateEntityIntoEmpty eId = do
   emptyArch' <- emptyArch
   allocateEntity emptyArch' eId []
 
--- -- | Deallocate an entity from an Archetype, given its index in the entities list.
--- --   This swap-removes the target index.
--- deallocateEntity :: Arch -> Int -> Ecs ()
--- deallocateEntity a record = do
---   let entities = a ^. #entities
---   n <- VR.pop entities
---   case n of
---     Just eId -> undefined
---     Nothing -> undefined
---   -- case VR.pop entities of
---   --   Just eId -> undefined
---   undefined
+-- | Deallocate an entity from an Archetype, given its index in the entities list.
+--   This swap-removes the target index with the last element.
+deallocateEntity :: Arch -> Int -> Ecs ()
+deallocateEntity arch idx = do
+  let entities = arch ^. #entities
+  n <- VR.pop entities
+  case n of
+    Just eId -> VR.write entities idx eId
+    Nothing -> pure ()
 
 -----------------------------------------------------------------------------------------
 derivingUnbox "Edge" [t|Edge -> (ArchId, ArchId)|] [|\(MkEdge a r)
@@ -769,6 +770,14 @@ identified = do
             (unsafeCoerce . error
              $ "Tried to access missing global '" <> show (typeRep $ Proxy @c) <> "'.")
       modify updateTInfo >> pushNewEdges >> pushGlobals >> pure nextTId
+
+-- Problems
+--
+-- 1. Mutable & immutable mixed everywhere
+-- 2. Global 'ecs' state
+-- 3. Use of StateT when there aren't supposed to be different Worlds laying around
+-- 4. Concerns about mutability GC costs
+
 
 instance Storage (GIOVector c) where
   type Elem (GIOVector c) = c
@@ -894,10 +903,19 @@ newtype CommandBuilder a =
   deriving (Generic,Applicative,Functor,Monad,MonadIO
            ,MonadState CommandQueue)
 
-insertionCommit :: Component c => Any -> EntityId -> ArchMovement -> Ecs ()
-insertionCommit component eId movement = do
-
-  undefined
+insertionCommit :: forall c. Component c => c -> EntityId -> ArchMovement -> Ecs ()
+insertionCommit c eId = \case
+    MovedArchetype { src, dest } -> do
+      -- We've moved archetypes. Remove and insert.
+      let locateStore target = getArch (target ^. #archId) >>= getArchStore @c <&> fromJust
+      srcStore <- locateStore src
+      destStore <- locateStore dest
+      storageInsert destStore eId c
+      storageRemove srcStore eId (dest ^. #idx)
+    SameArchetype (MkArchRecord { archId, idx }) -> do
+      -- We're in the same archetype. Modify.
+      targetStore <- getArch archId >>= getArchStore @c <&> fromJust
+      storageModify targetStore eId idx c
 
 -- | Add a component to an Entity.
 tagged :: forall c. Component c => c -> CommandBuilder ()
@@ -906,23 +924,16 @@ tagged c = do
   modify \cq ->
     let tagCommand = MkTag $ MkCommandPayload -- TODO replace w/ insertionCommit + removalCommit
             { typeId = ident
-            , commit = \eId storeIdx movement -> do
-                -- TODO Make this not allocate a closure
-                case movement of
-                  MovedArchetype { src, dest } -> do
-                    destStore <- do
-                      arch <- getArch (src ^. #archId)
-                      pure $ fromJust $ getArchStoreByIdx arch storeIdx
-                    srcStore <- do
-                      arch <- getArch (dest ^. #archId)
-                      pure $ fromJust $ getArchStoreByIdx arch storeIdx
-                    -- destStore <- fromJust <$> (getArchStoreByIdx <$> getArch (src ^. #archId) <*> pure storeIdx)
-                    -- srcStore <- fromJust <$> (getArchStoreByIdx <$> getArch (dest ^. #archId) <*> pure storeIdx)
-                    storageInsert destStore eId c
-                    storageRemove @(Layout c) srcStore eId (dest ^. #idx)
-                  SameArchetype (MkArchRecord { idx }) -> undefined
+            , commit = insertionCommit c
             }
     in undefined
+
+removalCommit :: forall c. Component c => EntityId -> ArchMovement -> Ecs ()
+removalCommit eId = \case
+    MovedArchetype { src, dest } -> do
+      srcStore <- getArch (src ^. #archId) >>= getArchStore @c <&> fromJust
+      storageRemove srcStore eId (dest ^. #idx)
+    SameArchetype _ -> pure ()
 
 -- | Remove a component from an Entity.
 untagged :: forall c. Component c => CommandBuilder ()
@@ -931,11 +942,7 @@ untagged = do
   modify \cq ->
     let tagCommand = MkTag $ MkCommandPayload
           { typeId = ident
-          , commit = \eId storeIdx movement -> do
-              undefined
-              -- let targetStore = fromJust $ getArchStoreByIdx @c arch storeIdx
-              -- case movement of
-                -- MovedArchetype (MkArchRecord { idx }) -> undefined
+          , commit = removalCommit @c
           }
     in undefined
   undefined
@@ -1238,16 +1245,16 @@ populateEdges arch = do
 --     entities <- VR.fromGrowable (qh ^. #trav . #currArch . #entities)
 --     VUM.iforM_ entities \idx (isValid, _) -> when isValid (f $ set #entity idx qh)
 
-freeEntity :: EntityId -> Ecs ()
-freeEntity eId = do
-  ecs <- get
-  record <- VR.read (ecs ^. #entities . #meta) (from eId)
-  targetArch <- VR.read (ecs ^. #archetypes) (from $ record ^. #archId)
-  VG.forM_ (VG.zip (VG.convert $ targetArch ^. #types) (targetArch ^. #components))
-    \(tId, storage)
-    -> let removeFunc =
-             view #_storageRemove $ (ecs ^. #types . #storageDicts) VG.! from tId
-       in removeFunc storage (record ^. #idx)
+-- freeEntity :: EntityId -> Ecs ()
+-- freeEntity eId = do
+--   ecs <- get
+--   record <- VR.read (ecs ^. #entities . #meta) (from eId)
+--   targetArch <- VR.read (ecs ^. #archetypes) (from $ record ^. #archId)
+--   VG.forM_ (VG.zip (VG.convert $ targetArch ^. #types) (targetArch ^. #components))
+--     \(tId, storage)
+--     -> let removeFunc =
+--              view #_storageRemove $ (ecs ^. #types . #storageDicts) VG.! from tId
+--        in removeFunc storage (record ^. #idx)
 
 -- | Locates these Commands' target archetype and commits.
 -- processCommands :: Commands -> Ecs ()

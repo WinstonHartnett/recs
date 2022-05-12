@@ -26,7 +26,9 @@ library
     Recs.Lib
 
   -- Modules included in this library but not exported.
-  -- other-modules:
+  other-modules:
+    Recs.TypeInfo
+    Recs.Utils
 
   default-extensions:
     BangPatterns
