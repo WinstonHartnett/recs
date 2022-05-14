@@ -18,57 +18,19 @@ module Recs.EntityInfo (
   verifyFlushedEntities,
 ) where
 
-import Control.Applicative (liftA2, (<|>))
-import Control.Lens hiding (from)
-import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
-import Control.Monad.Primitive (PrimMonad (..))
+import Control.Monad.Catch (MonadThrow)
 import Control.Monad.Reader
-import Control.Monad.State.Strict
-import Control.Monad.Trans (MonadIO)
-import Control.Monad.Trans.Maybe
 
-import Data.Coerce
 import Data.Default
-import Data.Either (fromRight)
-import Data.Generics.Labels
-import Data.HashMap.Internal (Hash)
-import Data.HashMap.Internal qualified as HM
-import Data.HashMap.Strict qualified as HMS
-import Data.Hashable
-import Data.IORef
-import Data.IntMap qualified as IM
-import Data.IntSet qualified as IS
-import Data.Kind
-import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.Primitive.PVar
-import Data.Proxy (Proxy (..))
-import Data.Sequence qualified as SQ
-import Data.Set qualified as S
-import Data.Text qualified as T
-import Data.Typeable (Typeable, typeRep, typeRepFingerprint)
-import Data.Vector qualified as V
-import Data.Vector.Algorithms.Heap qualified as V
-import Data.Vector.Algorithms.Search qualified as V
-import Data.Vector.Generic qualified as VG
-import Data.Vector.Generic.Mutable qualified as VGM
 import Data.Vector.Growable qualified as VR
-import Data.Vector.Mutable qualified as VM
-import Data.Vector.Primitive qualified as VP
-import Data.Vector.Unboxed qualified as VU
 import Data.Vector.Unboxed.Deriving
-import Data.Vector.Unboxed.Mutable qualified as VUM
 import Data.Word
 
-import GHC.Base (Any, IO (..), RealWorld)
-import GHC.Fingerprint (Fingerprint (..))
 import GHC.Generics (Generic)
-import GHC.Stack (HasCallStack)
-import GHC.TypeLits
 
 import Recs.Core
 import Recs.Utils
-
-import Unsafe.Coerce
 
 import Witch hiding (over)
 
@@ -173,7 +135,7 @@ flushEntities eInfo recordCommit = do
                 , ident = tryFrom' idx
                 }
             )
-            (entry ^. #location)
+            entry.location
         VR.write
           eInfo.records
           idx

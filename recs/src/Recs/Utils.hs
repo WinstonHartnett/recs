@@ -1,25 +1,25 @@
-module Recs.Utils
-  (GIOVector
-  ,GUIOVector
-  ,GPIOVector
-  ,GSIOVector
-  ,Vector
-  ,UVector
-  ,IOVector
-  ,UIOVector
-  ,tryFrom'
-  ,IOPVar) where
+module Recs.Utils (
+  GIOVector,
+  GUIOVector,
+  GPIOVector,
+  GSIOVector,
+  Vector,
+  UVector,
+  IOVector,
+  UIOVector,
+  tryFrom',
+  IOPVar,
+) where
 
-import           Data.Either                 (fromRight)
-import           Data.Primitive.PVar         (PVar,RealWorld)
-import qualified Data.Vector                 as V
-import qualified Data.Vector.Growable        as VR
-import qualified Data.Vector.Mutable         as VM
-import qualified Data.Vector.Primitive       as VP
-import qualified Data.Vector.Unboxed         as VU
-import qualified Data.Vector.Unboxed.Mutable as VUM
+import Data.Either (fromRight)
+import Data.Primitive.PVar (PVar, RealWorld)
+import Data.Vector qualified as V
+import Data.Vector.Growable qualified as VR
+import Data.Vector.Mutable qualified as VM
+import Data.Vector.Unboxed qualified as VU
+import Data.Vector.Unboxed.Mutable qualified as VUM
 
-import           Witch                       (TryFrom(..))
+import Witch (TryFrom (..))
 
 -- Vector Synonyms
 type GIOVector = VR.GrowableIOVector

@@ -1,115 +1,91 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE NoFieldSelectors #-}
+
 module Recs.TypeInfo where
 
-import           Control.Applicative           ((<|>),liftA2)
-import           Control.Lens                  hiding (from)
-import           Control.Monad.Catch           (MonadCatch,MonadMask,MonadThrow)
-import           Control.Monad.Primitive       (PrimMonad(..))
-import           Control.Monad.Reader
-import           Control.Monad.State.Strict
-import           Control.Monad.Trans.Maybe
+import Data.Either (fromRight)
+import Data.HashMap.Internal (Hash)
+import Data.HashMap.Strict qualified as HMS
+import Data.Primitive.PVar
+import Data.Proxy (Proxy (..))
+import Data.Typeable (Typeable, typeRep, typeRepFingerprint)
 
-import qualified Data.Sequence as SQ
-import           Data.Coerce
-import           Data.Default
-import           Data.Either                   (fromRight)
-import           Data.Generics.Labels
-import qualified Data.HashMap.Internal         as HM
-import           Data.HashMap.Internal         (Hash)
-import qualified Data.HashMap.Strict           as HMS
-import           Data.Hashable
-import           Data.IORef
-import qualified Data.IntMap                   as IM
-import qualified Data.IntSet                   as IS
-import           Data.Kind
-import           Data.Maybe                    (fromJust,fromMaybe,isJust)
-import           Data.Primitive.PVar
-import           Data.Proxy                    (Proxy(..))
-import qualified Data.Sequence                 as SQ
-import qualified Data.Set                      as S
-import qualified Data.Text                     as T
-import           Data.Typeable                 (Typeable,typeRep,typeRepFingerprint)
-import qualified Data.Vector                   as V
-import qualified Data.Vector.Algorithms.Heap   as V
-import qualified Data.Vector.Algorithms.Search as V
-import qualified Data.Vector.Generic           as VG
-import qualified Data.Vector.Generic.Mutable   as VGM
-import qualified Data.Vector.Growable          as VR
-import qualified Data.Vector.Mutable           as VM
-import qualified Data.Vector.Primitive         as VP
-import qualified Data.Vector.Unboxed           as VU
-import           Data.Vector.Unboxed.Deriving
-import qualified Data.Vector.Unboxed.Mutable   as VUM
-import           Data.Word
+import GHC.Base (Any)
+import GHC.Fingerprint (Fingerprint (..))
+import GHC.Generics (Generic)
 
-import           GHC.Base                      (Any,IO(..),RealWorld)
-import           GHC.Fingerprint               (Fingerprint(..))
-import           GHC.Generics                  (Generic)
-import           GHC.Stack                     (HasCallStack)
-import           GHC.TypeLits
+import Unsafe.Coerce
 
-import           Unsafe.Coerce
+import Witch hiding (over)
 
-import           Witch                         hiding (over)
-
+import Data.Default (Default (def))
+import Recs.Core
+import Recs.Storage
 import Recs.Utils
 
-import Recs.Lib (EntityId(..), TypeId(..), Edge(..))
+import Data.Vector.Growable qualified as VR
 
-{-
+-- | Provide a unique hash for each type.
+class Typeable t => Identify t where
+  identify :: (Hash, Fingerprint)
+  default identify :: (Hash, Fingerprint)
+  --   TODO Generate these w/ TH
+  identify = case typeRepFingerprint . typeRep $ Proxy @t of
+    f@(Fingerprint h _) -> (fromRight (error "Word size mismatch") (tryFrom h), f)
 
-= Garbage Collection Avoidance
+instance {-# OVERLAPPABLE #-} Typeable t => Identify t
 
-GHC's non-moving collector tracks mutation in the non-moving heap via a mut list.
-When an object is mutated, its contents are added to the mark queue.
+data SomeStorageDict = MkSomeStorageDict
+  { storageInsert :: Any -> EntityId -> Any -> Any Any
+  , storageRemove :: Any -> EntityId -> Int -> Any Any
+  , storageLookup :: Any -> EntityId -> Int -> Any Any
+  , storageModify :: Any -> EntityId -> Int -> Any -> Any Any
+  , storageInit :: !(Any Any)
+  }
 
-== Use of Mutation
+data StorageDict m s = MkStorageDict
+  { storageInsert :: s -> EntityId -> Elem s -> m s
+  , storageRemove :: s -> EntityId -> Int -> m s
+  , storageLookup :: s -> EntityId -> Int -> m (Elem s)
+  , storageModify :: s -> EntityId -> Int -> Elem s -> m s
+  , storageInit :: !(m s)
+  }
 
-Mutation is used in a few instances:
+instance From (StorageDict m s) SomeStorageDict where
+  from = unsafeCoerce @(StorageDict m s) @SomeStorageDict
 
-  - When the underlying data is unboxed and needs to be safely shared across
-    multiple threads without locks
-  - When frequent appends are needed, either an unboxed or boxed mutable vector is used
+-- | Reify a 'Storage' instance.
+mkStorageDict :: forall m a. Storage m a => StorageDict m a
+mkStorageDict =
+  MkStorageDict
+    { storageInsert = storageInsert
+    , storageRemove = storageRemove
+    , storageLookup = storageLookup
+    , storageModify = storageModify
+    , storageInit = storageInit
+    }
 
-== Goals
+-- | Unsafely coerce an unqualified 'SomeStorageDict' to a 'StorageDict'.
+unsafeCoerceStorageDict :: forall m a. Storage m a => SomeStorageDict -> StorageDict m a
+unsafeCoerceStorageDict = unsafeCoerce
 
-The goal is to avoid unnecessary GC on as much data as possible during a Gen 1
-collection. Thus, minimize the amount of boxed, mutable data.
+data TypeInfo = MkTypeInfo
+  { nextTypeId :: {-# UNPACK #-} !(IOPVar TypeId)
+  , types :: !(HMS.HashMap Fingerprint TypeId)
+  , storageDicts :: {-# UNPACK #-} !(GIOVector SomeStorageDict)
+  }
+  deriving (Generic)
 
--}
-
-data Arch = MkArch
-      { stores   :: Vector Any
-      , entities :: GUIOVector EntityId
-      , types    :: UVector TypeId
-      , edges    :: GUIOVector Edge
-      }
-      deriving Generic
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+instance {-# OVERLAPPING #-} (MonadPrim RealWorld m) => Default (m TypeInfo) where
+  def = do
+    nextTypeId <- newPVar (MkTypeId 0)
+    storageDicts <- VR.new
+    pure $
+      MkTypeInfo
+        { nextTypeId = nextTypeId
+        , types = HMS.empty
+        , storageDicts = storageDicts
+        }
