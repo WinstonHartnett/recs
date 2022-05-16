@@ -1,19 +1,16 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+
 module Recs.Storage where
 
 import Control.Monad.Catch (MonadThrow)
-
-
 import Data.HashMap.Strict qualified as HM
 import Data.Maybe (fromJust)
 import Data.Primitive.PVar
 import Data.Vector.Growable qualified as VR
 import Data.Vector.Unboxed qualified as VU
-
-
+import GHC.Base (Type)
 import Recs.Core
 import Recs.Utils
-
-
 
 class Storage m a where
   type Elem a
@@ -36,6 +33,14 @@ class Storage m a where
 
   -- | Instantiate a collection of the given type.
   storageInit :: m a
+
+{- | 'Component' specifies which storage structure to use for each type.
+
+   Storage defaults to 'Unboxed' for performance reasons. You must derive
+   'Component via Boxed' if you want Boxed storage.
+-}
+class (Monad m, Storage m (Layout c), Identify c) => Component m (c :: Type) where
+  type Layout c
 
 instance (MonadPrim RealWorld m, MonadThrow m) => Storage m (GIOVector c) where
   type Elem (GIOVector c) = c

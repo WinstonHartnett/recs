@@ -14,7 +14,6 @@
 {-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-{-# LANGUAGE UndecidableInstances #-}
 
 module Recs.Lib where
 

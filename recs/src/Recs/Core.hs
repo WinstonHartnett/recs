@@ -9,7 +9,7 @@
 {-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Recs.Core (TypeId (..), EntityId (..), ArchId (..), invalidArchId) where
+module Recs.Core (TypeId (..), EntityId (..), ArchId (..), invalidArchId, Identify (..)) where
 
 import Data.Bits
 import Data.Coerce
@@ -20,6 +20,10 @@ import Data.Word
 
 import GHC.Generics (Generic)
 
+import Data.Either (fromRight)
+import Data.HashMap.Internal (Hash)
+import Data.Typeable (Proxy (Proxy), Typeable, typeRep, typeRepFingerprint)
+import GHC.Fingerprint (Fingerprint (..))
 import Witch hiding (over)
 
 -- | Unique ID of a type known by the ECS.
@@ -81,3 +85,13 @@ instance From Int EntityId where
           }
 
 instance Hashable EntityId
+
+-- | Provide a unique hash for each type.
+class Typeable t => Identify t where
+  identify :: (Hash, Fingerprint)
+  default identify :: (Hash, Fingerprint)
+  --   TODO Generate these w/ TH
+  identify = case typeRepFingerprint . typeRep $ Proxy @t of
+    f@(Fingerprint h _) -> (fromRight (error "Word size mismatch") (tryFrom h), f)
+
+instance {-# OVERLAPPABLE #-} Typeable t => Identify t

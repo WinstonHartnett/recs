@@ -104,5 +104,11 @@ library
     , vector-algorithms
     , gstorable
   hs-source-dirs:   src
-  ghc-options:      -freverse-errors -fexpose-all-unfoldings -fspecialise-aggressively -fsimpl-tick-factor=200 -Wall
+  ghc-options:
+    -freverse-errors
+    -fexpose-all-unfoldings
+    -fspecialise-aggressively
+    -fsimpl-tick-factor=200
+    -flate-specialise
+    -Wall
   default-language: Haskell2010

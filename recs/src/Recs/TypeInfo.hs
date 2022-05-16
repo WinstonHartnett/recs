@@ -6,18 +6,14 @@
 
 module Recs.TypeInfo where
 
-import Data.Either (fromRight)
-import Data.HashMap.Internal (Hash)
 import Data.HashMap.Strict qualified as HMS
 import Data.Primitive.PVar
-import Data.Proxy (Proxy (..))
-import Data.Typeable (Typeable, typeRep, typeRepFingerprint)
 
 import GHC.Base (Any)
 import GHC.Fingerprint (Fingerprint (..))
 import GHC.Generics (Generic)
 
-import Unsafe.Coerce
+import Unsafe.Coerce (unsafeCoerce)
 
 import Witch hiding (over)
 
@@ -27,16 +23,6 @@ import Recs.Storage
 import Recs.Utils
 
 import Data.Vector.Growable qualified as VR
-
--- | Provide a unique hash for each type.
-class Typeable t => Identify t where
-  identify :: (Hash, Fingerprint)
-  default identify :: (Hash, Fingerprint)
-  --   TODO Generate these w/ TH
-  identify = case typeRepFingerprint . typeRep $ Proxy @t of
-    f@(Fingerprint h _) -> (fromRight (error "Word size mismatch") (tryFrom h), f)
-
-instance {-# OVERLAPPABLE #-} Typeable t => Identify t
 
 data SomeStorageDict = MkSomeStorageDict
   { storageInsert :: Any -> EntityId -> Any -> Any Any
@@ -89,3 +75,7 @@ instance {-# OVERLAPPING #-} (MonadPrim RealWorld m) => Default (m TypeInfo) whe
         , types = HMS.empty
         , storageDicts = storageDicts
         }
+
+identified :: forall m c. Component m c => m TypeId
+identified = do
+  undefined
