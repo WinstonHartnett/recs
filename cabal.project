@@ -1,8 +1,15 @@
 packages:
   recs
   recs-examples
-  -- ../co-log/co-log
-  -- ../co-log/co-log-core
-  -- ../arrayfire-haskell
-  ../generic-lens/generic-lens
-  ../generic-lens/generic-lens-core
+  --../generic-lens/generic-lens
+  --../generic-lens/generic-lens-core
+
+source-repository-package
+  type: git
+  location: https://github.com/haskell-effectful/effectful.git
+  subdir: effectful-core effectful-th effectful
+
+source-repository-package
+  type: git
+  location: https://github.com/kcsongor/generic-lens.git
+  subdir: generic-lens-core generic-lens

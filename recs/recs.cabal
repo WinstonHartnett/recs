@@ -38,47 +38,54 @@ library
     Recs.World
 
   default-extensions:
-    BangPatterns
-    BinaryLiterals
     BlockArguments
-    ConstrainedClassMethods
-    ConstraintKinds
-    DeriveDataTypeable
-    DeriveFoldable
-    DeriveFunctor
-    DeriveGeneric
-    DeriveLift
-    DeriveTraversable
-    EmptyCase
-    EmptyDataDeriving
-    ExistentialQuantification
-    ExplicitForAll
-    FlexibleContexts
-    FlexibleInstances
-    GADTSyntax
-    GeneralisedNewtypeDeriving
-    HexFloatLiterals
-    ImportQualifiedPost
-    InstanceSigs
-    KindSignatures
-    MultiParamTypeClasses
-    NamedFieldPuns
-    NamedWildCards
-    NumericUnderscores
+    TemplateHaskell
+    TypeFamilies
     OverloadedLabels
     OverloadedLists
-    PolyKinds
-    PostfixOperators
-    RankNTypes
-    ScopedTypeVariables
-    StandaloneDeriving
-    StandaloneKindSignatures
-    TemplateHaskell
-    TupleSections
-    TypeApplications
-    TypeFamilies
-    TypeOperators
-    TypeSynonymInstances
+    --AllowAmbiguousTypes
+    --BangPatterns
+    --BinaryLiterals
+    --BlockArguments
+    --ConstrainedClassMethods
+    --ConstraintKinds
+    --DataKinds
+    --DeriveDataTypeable
+    --DeriveFoldable
+    --DeriveFunctor
+    --DeriveGeneric
+    --DeriveLift
+    --DeriveTraversable
+    --EmptyCase
+    --EmptyDataDeriving
+    --ExistentialQuantification
+    --ExplicitForAll
+    --FlexibleContexts
+    --FlexibleInstances
+    --GADTSyntax
+    --GeneralisedNewtypeDeriving
+    --HexFloatLiterals
+    --ImportQualifiedPost
+    --InstanceSigs
+    --KindSignatures
+    --MultiParamTypeClasses
+    --NamedFieldPuns
+    --NamedWildCards
+    --NumericUnderscores
+    --OverloadedLabels
+    --OverloadedLists
+    --PolyKinds
+    --PostfixOperators
+    --RankNTypes
+    --ScopedTypeVariables
+    --StandaloneDeriving
+    --StandaloneKindSignatures
+    --TemplateHaskell
+    --TupleSections
+    --TypeApplications
+    --TypeFamilies
+    --TypeOperators
+    --TypeSynonymInstances
 
   -- LANGUAGE extensions used by modules in this package.
   -- other-extensions:
@@ -106,6 +113,7 @@ library
     , pvar
     , vector-algorithms
     , gstorable
+    , effectful
   hs-source-dirs:   src
   ghc-options:
     -freverse-errors
@@ -114,4 +122,4 @@ library
     -fsimpl-tick-factor=200
     -flate-specialise
     -Wall
-  default-language: Haskell2010
+  default-language: GHC2021

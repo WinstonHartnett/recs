@@ -13,7 +13,7 @@ import GHC.Base (Any)
 import GHC.Generics (Generic)
 import Recs.Archetype
 import Recs.Core
-import Recs.Storage (Component)
+import Recs.Storage
 import Recs.TypeInfo (identified)
 
 {- Type Utilities
@@ -109,7 +109,7 @@ data QueryOperator
     OpStow !QuerySubject
   | -- | Archetype must have this component.
     OpWith !TypeId
-  | -- | Archetype mustn't satisfy this query.
+  | -- | Archetype must not satisfy this query.
     OpNot !QueryOperator
   | -- | Archetype must satisfy both queries.
     OpAnd !QueryOperator !QueryOperator
@@ -185,19 +185,19 @@ instance (Monad m, DesugarQuery m a, DesugarQuery m b) => DesugarQuery m (a ||| 
 instance (Monad m, DesugarQuery m q) => DesugarQuery m (Not q) where
   desugarQuery = OpNot <$> desugarQuery @_ @q
 
-instance Component m c => DesugarQuery m (Maybe (Nab c)) where
+instance Component c => DesugarQuery m (Maybe (Nab c)) where
   desugarQuery = OpNab . SubMaybe <$> identified @_ @c
 
-instance Component m c => DesugarQuery m (Maybe (Stow c)) where
+instance Component c => DesugarQuery m (Maybe (Stow c)) where
   desugarQuery = OpStow . SubMaybe <$> identified @_ @c
 
-instance Component m c => DesugarQuery m (Nab c) where
+instance Component c => DesugarQuery m (Nab c) where
   desugarQuery = OpNab . SubBase <$> identified @_ @c
 
-instance Component m c => DesugarQuery m (Stow c) where
+instance Component c => DesugarQuery m (Stow c) where
   desugarQuery = OpStow . SubBase <$> identified @_ @c
 
-instance Component m c => DesugarQuery m (With c) where
+instance Component c => DesugarQuery m (With c) where
   desugarQuery = OpWith <$> identified @_ @c
 
 class Queryable m q where

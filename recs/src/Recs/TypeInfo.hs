@@ -5,6 +5,7 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE UnboxedTuples #-}
@@ -12,19 +13,22 @@
 
 module Recs.TypeInfo where
 
-import Control.Concurrent (MVar, newMVar)
 import Control.Monad.State.Strict (MonadIO (liftIO))
+import Data.Coerce (coerce)
 import Data.Default (Default (def))
-import Data.HashMap.Strict qualified as HMS
+import Data.Either (fromRight)
+import Data.HashMap.Internal qualified as HMS
 import Data.Primitive.PVar
 import Data.Vector.Growable qualified as VR
 import GHC.Base (Any)
 import GHC.Fingerprint (Fingerprint (..))
 import GHC.Generics (Generic)
 import Recs.Core
-import Recs.Utils (GIOVector, GUIOVector, IOPVar)
+import Recs.Utils (GIOVector, GUIOVector, IOPVar, tryFrom')
 import Unsafe.Coerce (unsafeCoerce)
 import Witch hiding (over)
+import Effectful
+import qualified Data.Vector as V
 
 data SomeStorageDict = MkSomeStorageDict
   { _storageInsert :: Any -> EntityId -> Any -> Any Any
@@ -57,31 +61,77 @@ mkStorageDict =
     }
 
 -- | Unsafely coerce an unqualified 'SomeStorageDict' to a 'StorageDict'.
-unsafeCoerceStorageDict :: forall m a. Storage a => SomeStorageDict -> StorageDict a
+unsafeCoerceStorageDict :: forall a. Storage a => SomeStorageDict -> StorageDict a
 unsafeCoerceStorageDict = unsafeCoerce
 
 data TypeInfo = MkTypeInfo
-  { nextTypeId :: {-# UNPACK #-} !(IOPVar TypeId)
+  { nextTypeId :: {-# UNPACK #-} !(IOPVar Int)
   -- ^ Can only be accessed atomically.
-  , globalTypes :: MVar (HMS.HashMap Fingerprint TypeId)
   , types :: !(HMS.HashMap Fingerprint TypeId)
-  , storageDicts :: {-# UNPACK #-} !(GIOVector SomeStorageDict)
+  , storageDicts :: !(V.Vector SomeStorageDict)
   }
   deriving (Generic)
 
 instance {-# OVERLAPPING #-} (MonadIO m, MonadPrim RealWorld m) => Default (m TypeInfo) where
   def = do
-    nextTypeId <- newPVar (MkTypeId 0)
-    storageDicts <- VR.new
-    globalTypes <- liftIO $ newMVar HMS.empty
+    nextTypeId <- newPVar 0
+    -- storageDicts <- VR.new
     pure $
       MkTypeInfo
         { nextTypeId = nextTypeId
-        , globalTypes = globalTypes
         , types = HMS.empty
-        , storageDicts = storageDicts
+        , storageDicts = V.empty
         }
 
-identified :: (Monad m, Component c) => TypeInfo -> m TypeId
-identified tInfo = do
-  undefined
+reserveTypeId :: TypeInfo -> IO TypeId
+reserveTypeId tInfo = atomicModifyIntPVar tInfo.nextTypeId \tId -> (tId + 1, tryFrom' tId)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

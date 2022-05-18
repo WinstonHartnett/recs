@@ -2,14 +2,14 @@ module Main where
 
 import Recs.Lib
 import qualified Data.Vector.Unboxed as VU
-import Control.Monad.State.Strict
+-- import Control.Monad.State.Strict
 import Data.Maybe (fromJust)
 import Control.Monad
 import Data.Default
 import Linear.V3
 import Linear.V4
 import Linear.Matrix
-import           Data.Vector.Unboxed.Deriving
+import Data.Vector.Unboxed.Deriving ( derivingUnbox )
 import GHC.Generics (Generic)
 import Data.Word
 
@@ -92,4 +92,7 @@ myFunc = do
   pure ()
 
 main :: IO ()
-main = void $ runStateT (unEcs myFunc) =<< def
+main = pure ()
+
+-- main :: IO ()
+-- main = void $ runStateT (unEcs myFunc) =<< def

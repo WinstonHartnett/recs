@@ -1,6 +1,6 @@
-module Recs.Archetype (Edge, Archetype, Archetypes) where
+module Recs.Archetype (Edge(..), Archetype(..), Archetypes(..)) where
 
-import Data.Strict.Maybe as SM (Maybe (..), fromMaybe)
+-- import Data.Strict.Maybe as SM (Maybe (..), fromMaybe)
 import Data.Vector.Unboxed.Deriving
 
 import GHC.Base (Any)
@@ -8,11 +8,12 @@ import GHC.Generics (Generic)
 
 import Recs.Core
 import Recs.Utils
+import Data.Maybe (fromMaybe)
 
 -- | An edge in the Archetype graph.
 data Edge = MkEdge
-  { add :: !(SM.Maybe ArchId)
-  , remove :: !(SM.Maybe ArchId)
+  { add :: !(Maybe ArchId)
+  , remove :: !(Maybe ArchId)
   }
   deriving (Generic, Show)
 
@@ -21,13 +22,13 @@ derivingUnbox
   [t|Edge -> (ArchId, ArchId)|]
   [|
     \(MkEdge{add, remove}) ->
-      (SM.fromMaybe invalidArchId add, SM.fromMaybe invalidArchId remove)
+      (fromMaybe invalidArchId add, fromMaybe invalidArchId remove)
     |]
   [|
     \(add, remove) ->
       let convertArchId i
-            | invalidArchId == i = SM.Nothing
-            | otherwise = SM.Just i
+            | invalidArchId == i = Nothing
+            | otherwise = Just i
        in MkEdge (convertArchId add) (convertArchId remove)
     |]
 
@@ -39,5 +40,5 @@ data Archetype = MkArch
   }
   deriving (Generic)
 
-newtype Archetypes = MkArchetypes (GIOVector Archetype)
+newtype Archetypes = MkArchetypes { unArchetypes :: GIOVector Archetype }
   deriving (Generic)

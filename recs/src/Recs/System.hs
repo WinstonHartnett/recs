@@ -3,16 +3,13 @@ module Recs.System where
 import Control.Monad.Catch (MonadThrow)
 import Control.Monad.State.Strict (MonadIO, MonadState, MonadTrans (lift), StateT)
 import Recs.Commands
-import Recs.Core
-import Recs.TypeInfo (TypeInfo)
-import Recs.Utils
-import GHC.Fingerprint (Fingerprint)
+import Recs.World (World)
+import Control.Monad.Primitive
 
 -- | System-local state.
 data SystemState m = MkSystemState
   { commands :: {-# UNPACK #-} !(Commands m)
-  , newTypeIds :: {-# UNPACK #-} !(GUIOVector (Fingerprint, TypeId))
-  , typeInfo :: !TypeInfo
+  , world :: !World
   }
 
 newtype SystemT m a = MkSystemT
@@ -26,6 +23,11 @@ newtype SystemT m a = MkSystemT
     , MonadState (SystemState m)
     , MonadThrow
     )
+
+instance PrimMonad m => PrimMonad (SystemT m) where
+  type PrimState (SystemT m) = PrimState m
+
+  primitive = MkSystemT . primitive
 
 instance MonadTrans SystemT where
   lift = MkSystemT . lift

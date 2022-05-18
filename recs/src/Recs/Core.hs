@@ -97,7 +97,6 @@ class Typeable t => Identify t where
 
 instance Typeable t => Identify t
 
--- |
 class Storage a where
   type Elem a
 
@@ -125,5 +124,5 @@ class Storage a where
    Storage defaults to 'Unboxed' for performance reasons. You must derive
    'Component via Boxed' if you want Boxed storage.
 -}
-class Identify c => Component (c :: Type) where
+class (Storage (Layout c), Identify c) => Component (c :: Type) where
   type Layout c

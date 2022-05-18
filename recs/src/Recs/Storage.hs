@@ -1,4 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Recs.Storage where
@@ -11,25 +12,6 @@ import Data.Vector.Unboxed qualified as VU
 import Data.Vector.Unboxed.Deriving
 import Recs.Core
 import Recs.Utils
-
-{- Component wrappers.
--}
-newtype Boxed c = MkBoxed {unBoxed :: c}
-
-instance Typeable c => Component (Boxed c) where
-  type Layout (Boxed c) = GIOVector (Boxed c)
-
-newtype Unboxed c = MkUnboxed {unUnboxed :: c}
-
-instance (Typeable c, VU.Unbox c) => Component (Unboxed c) where
-  type Layout (Unboxed c) = GUIOVector (Unboxed c)
-
-derivingUnbox "Unboxed" [t|forall c. VU.Unbox c => Unboxed c -> c|] [|\(MkUnboxed c) -> c|] [|MkUnboxed|]
-
-newtype Mapped c = MkMapped {unMapped :: c}
-
-instance Typeable c => Component (Mapped c) where
-  type Layout (Mapped c) = HM.HashMap EntityId c
 
 instance Storage (GIOVector c) where
   type Elem (GIOVector c) = c
@@ -72,3 +54,22 @@ instance Storage (HM.HashMap EntityId c) where
   storageModify h eId _ e = pure $ HM.insert eId e h
 
   storageInit = pure $ HM.empty
+
+{- Component wrappers.
+-}
+newtype Boxed c = MkBoxed {unBoxed :: c}
+
+instance Typeable c => Component (Boxed c) where
+  type Layout (Boxed c) = GIOVector (Boxed c)
+
+newtype Unboxed c = MkUnboxed {unUnboxed :: c}
+
+derivingUnbox "Unboxed" [t|forall c. VU.Unbox c => Unboxed c -> c|] [|\(MkUnboxed c) -> c|] [|MkUnboxed|]
+
+instance (Typeable c, VU.Unbox c) => Component (Unboxed c) where
+  type Layout (Unboxed c) = GUIOVector (Unboxed c)
+
+newtype Mapped c = MkMapped {unMapped :: c}
+
+instance Typeable c => Component (Mapped c) where
+  type Layout (Mapped c) = HM.HashMap EntityId c
