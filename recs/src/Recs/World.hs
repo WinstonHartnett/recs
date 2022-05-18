@@ -7,6 +7,7 @@ import Recs.EntityInfo (EntityInfo)
 import Recs.TypeInfo
 import Recs.Utils
 import Control.Monad.Trans (MonadIO)
+import qualified Data.Sequence as SQ
 
 newtype Globals = MkGlobals {unGlobals :: GIOVector Any}
 
@@ -17,16 +18,16 @@ data World = MkWorld
   , typeInfo :: TypeInfo
   }
 
--- | System-local state.
---
--- = World Sharding
---
--- The main 'World' is farmed out to systems for local modifications, which are
--- merged back into the main 'World' upon System conclusion.
-data SystemState = MkSystemState
-  { commands :: Int
-  }
+-- -- | System-local state.
+-- --
+-- -- = World Sharding
+-- --
+-- -- The main 'World' is farmed out to systems for local modifications, which are
+-- -- merged back into the main 'World' upon System conclusion.
+-- data SystemState = MkSystemState
+--   { commands :: Int
+--   }
 
-mergeSystemStateIntoWorld :: MonadIO m => SystemState -> World -> m World
-mergeSystemStateIntoWorld ss w = do
-  undefined
+-- mergeSystemStateIntoWorld :: MonadIO m => SystemState -> World -> m World
+-- mergeSystemStateIntoWorld ss w = do
+--   undefined

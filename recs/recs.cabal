@@ -33,6 +33,9 @@ library
     Recs.Archetype
     Recs.EntityInfo
     Recs.Storage
+    Recs.Commands
+    Recs.System
+    Recs.World
 
   default-extensions:
     BangPatterns

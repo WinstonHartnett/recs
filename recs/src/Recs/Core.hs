@@ -9,7 +9,7 @@
 {-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Recs.Core (TypeId (..), EntityId (..), ArchId (..), invalidArchId, Identify (..)) where
+module Recs.Core (TypeId (..), EntityId (..), ArchId (..), invalidArchId, Identify (..), Storage (..), Component (..)) where
 
 import Data.Bits
 import Data.Coerce
@@ -22,6 +22,7 @@ import GHC.Generics (Generic)
 
 import Data.Either (fromRight)
 import Data.HashMap.Internal (Hash)
+import Data.Kind (Type)
 import Data.Typeable (Proxy (Proxy), Typeable, typeRep, typeRepFingerprint)
 import GHC.Fingerprint (Fingerprint (..))
 import Witch hiding (over)
@@ -94,4 +95,35 @@ class Typeable t => Identify t where
   identify = case typeRepFingerprint . typeRep $ Proxy @t of
     f@(Fingerprint h _) -> (fromRight (error "Word size mismatch") (tryFrom h), f)
 
-instance {-# OVERLAPPABLE #-} Typeable t => Identify t
+instance Typeable t => Identify t
+
+-- |
+class Storage a where
+  type Elem a
+
+  -- | Add a new row with a given entity.
+  storageInsert :: a -> EntityId -> Elem a -> IO a
+
+  -- | Remove a row at the given index.
+  --   This performs a swap-remove on the store-level with the last element.
+  --
+  --   __Safety:__ the corresponding archetype entity entry must be immediately updated
+  --   to reflect the swap-remove.
+  storageRemove :: a -> EntityId -> Int -> IO a
+
+  -- | Lookup the row at the given index.
+  storageLookup :: a -> EntityId -> Int -> IO (Elem a)
+
+  -- | Write a new element to the given index.
+  storageModify :: a -> EntityId -> Int -> Elem a -> IO a
+
+  -- | Instantiate a collection of the given type.
+  storageInit :: IO a
+
+{- | 'Component' specifies which storage structure to use for each type.
+
+   Storage defaults to 'Unboxed' for performance reasons. You must derive
+   'Component via Boxed' if you want Boxed storage.
+-}
+class Identify c => Component (c :: Type) where
+  type Layout c
