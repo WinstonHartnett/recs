@@ -45,49 +45,49 @@ library
     TypeFamilies
     OverloadedLabels
     OverloadedLists
-    --AllowAmbiguousTypes
-    --BangPatterns
-    --BinaryLiterals
-    --BlockArguments
-    --ConstrainedClassMethods
-    --ConstraintKinds
-    --DataKinds
-    --DeriveDataTypeable
-    --DeriveFoldable
-    --DeriveFunctor
-    --DeriveGeneric
-    --DeriveLift
-    --DeriveTraversable
-    --EmptyCase
-    --EmptyDataDeriving
-    --ExistentialQuantification
-    --ExplicitForAll
-    --FlexibleContexts
-    --FlexibleInstances
-    --GADTSyntax
-    --GeneralisedNewtypeDeriving
-    --HexFloatLiterals
-    --ImportQualifiedPost
-    --InstanceSigs
-    --KindSignatures
-    --MultiParamTypeClasses
-    --NamedFieldPuns
-    --NamedWildCards
-    --NumericUnderscores
-    --OverloadedLabels
-    --OverloadedLists
-    --PolyKinds
-    --PostfixOperators
-    --RankNTypes
-    --ScopedTypeVariables
-    --StandaloneDeriving
-    --StandaloneKindSignatures
-    --TemplateHaskell
-    --TupleSections
-    --TypeApplications
-    --TypeFamilies
-    --TypeOperators
-    --TypeSynonymInstances
+    AllowAmbiguousTypes
+    BangPatterns
+    BinaryLiterals
+    BlockArguments
+    ConstrainedClassMethods
+    ConstraintKinds
+    DataKinds
+    DeriveDataTypeable
+    DeriveFoldable
+    DeriveFunctor
+    DeriveGeneric
+    DeriveLift
+    DeriveTraversable
+    EmptyCase
+    EmptyDataDeriving
+    ExistentialQuantification
+    ExplicitForAll
+    FlexibleContexts
+    FlexibleInstances
+    GADTSyntax
+    GeneralisedNewtypeDeriving
+    HexFloatLiterals
+    ImportQualifiedPost
+    InstanceSigs
+    KindSignatures
+    MultiParamTypeClasses
+    NamedFieldPuns
+    NamedWildCards
+    NumericUnderscores
+    OverloadedLabels
+    OverloadedLists
+    PolyKinds
+    PostfixOperators
+    RankNTypes
+    ScopedTypeVariables
+    StandaloneDeriving
+    StandaloneKindSignatures
+    TemplateHaskell
+    TupleSections
+    TypeApplications
+    TypeFamilies
+    TypeOperators
+    TypeSynonymInstances
 
   -- LANGUAGE extensions used by modules in this package.
   -- other-extensions:
@@ -124,4 +124,5 @@ library
     -fsimpl-tick-factor=200
     -flate-specialise
     -Wall
-  default-language: GHC2021
+  -- default-language: GHC2021
+  default-language: Haskell2010

@@ -75,11 +75,20 @@ executable recs-examples
         base
       , recs
       , vector
+      , deepseq
       , mtl
       , data-default
+      , criterion
       , linear
       , vector-th-unbox
       , effectful
     hs-source-dirs:   app
     -- ghc-options:      -rtsopts -with-rtsopts=-p
+    -- ghc-options:
+    --   -freverse-errors
+    --   -fexpose-all-unfoldings
+    --   -fspecialise-aggressively
+    --   -fsimpl-tick-factor=200
+    --   -flate-specialise
+    --   -Wall
     default-language: Haskell2010
