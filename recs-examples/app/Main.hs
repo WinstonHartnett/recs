@@ -1,4 +1,6 @@
-{-# LANGUAGE DeriveAnyClass #-}
+-- {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DerivingVia #-}
 
 module Main where
 
@@ -18,7 +20,9 @@ import Effectful
 import Effectful.State.Static.Local
 import Data.Coerce (coerce)
 import Criterion.Main
-import Control.DeepSeq (NFData)
+import Control.DeepSeq (NFData, force)
+import qualified Control.Monad.State.Strict as ST
+import qualified Control.Monad.Identity as ST
 
 newtype Velocity = MkVelocity (V3 Float)
 
@@ -84,17 +88,19 @@ data Combined = MkCombined
       , df :: !D
       , ef :: !E
       }
-    deriving (Generic, NFData)
+    deriving (Generic)
+
+instance NFData Combined
 
 modifyAll :: State Combined :> es => Eff es ()
 modifyAll = do
   modify \c ->
     MkCombined
-      { af = MkA $ (+1) (unA $ af c)
-      , bf = MkB $ (+1) (unB $ bf c)
-      , cf = coerce @(Int -> Int) (+1) (cf c)
-      , df = coerce @(Int -> Int) (+1) (df c)
-      , ef = coerce @(Int -> Int) (+1) (ef c)
+      { af = force $ MkA $ (+1) (unA $ af c)
+      , bf = force $ MkB $ (+1) (unB $ bf c)
+      , cf = force $ coerce @(Int -> Int) (+1) (cf c)
+      , df = force $ coerce @(Int -> Int) (+1) (df c)
+      , ef = force $ coerce @(Int -> Int) (+1) (ef c)
       }
 
 modA :: State A :> es => Eff es ()
@@ -115,6 +121,33 @@ modE = modify \(MkE a) -> MkE (a + 1)
 modInd :: (State A :> es, State B :> es, State C :> es, State D :> es, State E :> es) => Eff es ()
 modInd = modA >> modB >> modC >> modD >> modE
 
+newtype CombinedT m a = MkCombinedT { unCombined :: ST.StateT Combined m a }
+  deriving (Applicative, Functor, Monad, ST.MonadState Combined)
+
+modifyST :: Monad m => CombinedT m ()
+modifyST = do
+  ST.modify \c ->
+    MkCombined
+      { af = force $ MkA $ (+1) (unA $ af c)
+      , bf = force $ MkB $ (+1) (unB $ bf c)
+      , cf = force $ coerce @(Int -> Int) (+1) (cf c)
+      , df = force $ coerce @(Int -> Int) (+1) (df c)
+      , ef = force $ coerce @(Int -> Int) (+1) (ef c)
+      }
+
+modifyF :: Combined -> Combined
+modifyF = go 100000
+  where
+    go 0    !com = com
+    go !idx !com =
+      go (idx - 1) MkCombined
+        { af = force $ coerce @(Int -> Int) (+1) (af com)
+        , bf = force $ coerce @(Int -> Int) (+1) (bf com)
+        , cf = force $ coerce @(Int -> Int) (+1) (cf com)
+        , df = force $ coerce @(Int -> Int) (+1) (df com)
+        , ef = force $ coerce @(Int -> Int) (+1) (ef com)
+        }
+    -- go !idx !com = 
 -- myFunc :: Ecs ()
 -- myFunc = do
 --   -- createArch []
@@ -149,8 +182,10 @@ modInd = modA >> modB >> modC >> modD >> modE
 
 main :: IO ()
 main = defaultMain [
-  bench "modifyAll" $ nf (runPureEff . runState (MkCombined (MkA 0) (MkB 1) (MkC 2) (MkD 3) (MkE 4))) (replicateM_ 1000 modifyAll),
-  bench "modifyInd" $ nf (runPureEff . runState (MkA 0) . runState (MkB 0) . runState (MkC 0) . runState (MkD 0) . runState (MkE 0)) (replicateM_ 1000 modInd)
+  bench "modifyAll" $ nf (runPureEff . runState (MkCombined (MkA 0) (MkB 1) (MkC 2) (MkD 3) (MkE 4))) (replicateM_ 10000 modifyAll),
+  bench "modifyInd" $ nf (runPureEff . runState (MkA 0) . runState (MkB 0) . runState (MkC 0) . runState (MkD 0) . runState (MkE 0)) (replicateM_ 10000 modInd),
+  bench "modifyST"  $ nf (ST.runIdentity . flip ST.runStateT (MkCombined (MkA 0) (MkB 1) (MkC 2) (MkD 3) (MkE 4))) (replicateM_ 10000 $ unCombined modifyST),
+  bench "pure" $ nf (\f -> f $ MkCombined (MkA 0) (MkB 1) (MkC 2) (MkD 3) (MkE 4)) modifyF
   ]
 
 

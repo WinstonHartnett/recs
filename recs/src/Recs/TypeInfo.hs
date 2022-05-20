@@ -13,125 +13,41 @@
 
 module Recs.TypeInfo where
 
-import Control.Monad.State.Strict (MonadIO (liftIO))
-import Data.Coerce (coerce)
-import Data.Default (Default (def))
-import Data.Either (fromRight)
+import Control.Lens (over)
 import Data.HashMap.Internal qualified as HMS
-import Data.Primitive.PVar
-import Data.Vector.Growable qualified as VR
-import GHC.Base (Any)
-import GHC.Fingerprint (Fingerprint (..))
-import GHC.Generics (Generic)
+import Data.Primitive.PVar (atomicModifyIntPVar)
+import Data.Vector qualified as V
+import Effectful
+import Effectful.State.Static.Local (get, modify)
 import Recs.Core
-import Recs.Utils (GIOVector, GUIOVector, IOPVar, tryFrom')
+import Recs.Types
+import Recs.Utils
 import Unsafe.Coerce (unsafeCoerce)
 import Witch hiding (over)
-import Effectful
-import qualified Data.Vector as V
-
-data SomeStorageDict = MkSomeStorageDict
-  { _storageInsert :: Any -> EntityId -> Any -> Any Any
-  , _storageRemove :: Any -> EntityId -> Int -> Any Any
-  , _storageLookup :: Any -> EntityId -> Int -> Any Any
-  , _storageModify :: Any -> EntityId -> Int -> Any -> Any Any
-  , _storageInit :: !(Any Any)
-  }
-
-data StorageDict s = MkStorageDict
-  { _storageInsert :: s -> EntityId -> Elem s -> IO s
-  , _storageRemove :: s -> EntityId -> Int -> IO s
-  , _storageLookup :: s -> EntityId -> Int -> IO (Elem s)
-  , _storageModify :: s -> EntityId -> Int -> Elem s -> IO s
-  , _storageInit :: !(IO s)
-  }
-
-instance From (StorageDict s) SomeStorageDict where
-  from = unsafeCoerce @(StorageDict s) @SomeStorageDict
-
--- | Reify a 'Storage' instance.
-mkStorageDict :: forall a. Storage a => StorageDict a
-mkStorageDict =
-  MkStorageDict
-    { _storageInsert = storageInsert
-    , _storageRemove = storageRemove
-    , _storageLookup = storageLookup
-    , _storageModify = storageModify
-    , _storageInit = storageInit
-    }
 
 -- | Unsafely coerce an unqualified 'SomeStorageDict' to a 'StorageDict'.
 unsafeCoerceStorageDict :: forall a. Storage a => SomeStorageDict -> StorageDict a
 unsafeCoerceStorageDict = unsafeCoerce
 
-data TypeInfo = MkTypeInfo
-  { nextTypeId :: {-# UNPACK #-} !(IOPVar Int)
-  -- ^ Can only be accessed atomically.
-  , types :: !(HMS.HashMap Fingerprint TypeId)
-  , storageDicts :: !(V.Vector SomeStorageDict)
-  }
-  deriving (Generic)
+reserveTypeId :: Ecs es => Eff es TypeId
+reserveTypeId = do
+  ecs <- get @World
+  atomicModifyIntPVar ecs.typeInfo.nextTypeId \tId -> (tId + 1, tryFrom' tId)
 
-instance {-# OVERLAPPING #-} (MonadIO m, MonadPrim RealWorld m) => Default (m TypeInfo) where
-  def = do
-    nextTypeId <- newPVar 0
-    -- storageDicts <- VR.new
-    pure $
-      MkTypeInfo
-        { nextTypeId = nextTypeId
-        , types = HMS.empty
-        , storageDicts = V.empty
-        }
-
-reserveTypeId :: MonadPrim RealWorld m => TypeInfo -> m TypeId
-reserveTypeId tInfo = atomicModifyIntPVar tInfo.nextTypeId \tId -> (tId + 1, tryFrom' tId)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+{- | Retrieve this type's ID from the global type registry, adding any necessary
+   information to the type registry.
+-}
+identified :: forall c es. (Component c, Ecs es) => Eff es TypeId
+identified = do
+  ecs <- get @World
+  case uncurry HMS.lookup' (identify @c) ecs.typeInfo.types of
+    Just tId -> pure tId
+    Nothing -> do
+      let (h, f) = identify @c
+      nextTId <- reserveTypeId
+      let updateTInfo =
+            let pushStorageDict = (`V.snoc` from (mkStorageDict @(Layout c)))
+                pushNewType = HMS.insert' h f nextTId
+             in over #typeInfo (over #storageDicts pushStorageDict . over #types pushNewType)
+      modify @World updateTInfo
+      pure nextTId

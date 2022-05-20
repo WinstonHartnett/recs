@@ -35,7 +35,7 @@ library
     Recs.Storage
     Recs.Commands
     Recs.System
-    Recs.World
+    Recs.Types
     Recs.Query
 
   default-extensions:

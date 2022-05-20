@@ -14,6 +14,7 @@ import GHC.Generics (Generic)
 import Recs.Archetype
 import Recs.Core
 import Recs.Storage
+import Recs.Types
 
 {- Type Utilities
 -}

@@ -14,9 +14,7 @@ import Data.Vector.Unboxed qualified as VU
 import Data.Vector.Unboxed.Deriving
 import Recs.Core
 import Recs.Utils
-import Data.Kind (Type, Constraint)
-import Data.Primitive (Prim)
-import GHC.TypeLits
+import Recs.Types
 
 instance Storage (GIOVector c) where
   type Elem (GIOVector c) = c
