@@ -18,21 +18,19 @@ module Recs.EntityInfo (
   verifyFlushedEntities,
 ) where
 
-import Control.Monad.Catch (MonadThrow)
 import Control.Monad.Reader
-
 import Data.Default
-import Data.Primitive.PVar
 import Data.Vector.Growable qualified as VR
 import Data.Vector.Unboxed.Deriving
 import Data.Word
-
 import GHC.Generics (Generic)
-
 import Recs.Core
 import Recs.Utils
-
+import Effectful
+import Effectful.Prim (Prim)
+import Effectful.State.Static.Local
 import Witch hiding (over)
+import Data.Primitive.PVar (newPVar, atomicSubIntPVar, writePVar, atomicReadIntPVar, readPVar, modifyPVar_)
 
 data EntityRecord = MkEntityRecord
   { archId :: !ArchId
@@ -89,7 +87,9 @@ instance {-# OVERLAPPING #-} Default (IO EntityInfo) where
 
    __Safety:__ only safe while not flushing entity IDs.
 -}
-reserveEntityId :: (MonadThrow m, MonadPrim RealWorld m) => EntityInfo -> m EntityId
+
+-- reserveEntityId :: (MonadThrow m, MonadPrim RealWorld m) => EntityInfo -> Eff es EntityId
+reserveEntityId :: Prim :> es => EntityInfo -> Eff es EntityId
 reserveEntityId eInfo = do
   n <- atomicSubIntPVar eInfo.freeCursor 1
   if n > 0
@@ -100,7 +100,7 @@ reserveEntityId eInfo = do
 
    __Safety:__ not thread-safe.
 -}
-freeEntityId :: MonadPrim RealWorld m => EntityInfo -> EntityId -> m ()
+freeEntityId :: Prim :> es => EntityInfo -> EntityId -> Eff es ()
 freeEntityId eInfo eId = do
   verifyFlushedEntities eInfo
   let pending = eInfo.pending
@@ -108,7 +108,7 @@ freeEntityId eInfo eId = do
   writePVar eInfo.freeCursor =<< VR.length pending
 
 -- | Verify that all pending entity IDs have been committed.
-verifyFlushedEntities :: MonadPrim RealWorld m => EntityInfo -> m ()
+verifyFlushedEntities :: Prim :> es => EntityInfo -> Eff es ()
 verifyFlushedEntities eInfo = do
   freeCursor <- atomicReadIntPVar $ eInfo.freeCursor
   pendingLen <- VR.length $ eInfo.pending
@@ -121,10 +121,10 @@ verifyFlushedEntities eInfo = do
    __Safety__: not thread-safe.
 -}
 flushEntities ::
-  (MonadPrim RealWorld m, MonadThrow m) =>
+  Prim :> es =>
   EntityInfo ->
-  (EntityId -> EntityRecord -> m EntityRecord) ->
-  m ()
+  (EntityId -> EntityRecord -> Eff es EntityRecord) ->
+  Eff es ()
 flushEntities eInfo recordCommit = do
   let updateEntries lst = forM_ @[] lst \idx -> do
         entry <- VR.read eInfo.records idx

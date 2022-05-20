@@ -83,7 +83,7 @@ instance {-# OVERLAPPING #-} (MonadIO m, MonadPrim RealWorld m) => Default (m Ty
         , storageDicts = V.empty
         }
 
-reserveTypeId :: TypeInfo -> IO TypeId
+reserveTypeId :: MonadPrim RealWorld m => TypeInfo -> m TypeId
 reserveTypeId tInfo = atomicModifyIntPVar tInfo.nextTypeId \tId -> (tId + 1, tryFrom' tId)
 
 

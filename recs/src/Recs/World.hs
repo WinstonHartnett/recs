@@ -1,33 +1,34 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DerivingVia #-}
-{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UnboxedTuples #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Recs.World where
 
-import qualified Data.HashMap.Internal as HM
+import Control.Lens hiding (from)
+import Control.Monad.IO.Class (liftIO)
+import Data.Generics.Labels ()
+import Data.HashMap.Internal qualified as HM
+import Data.Vector qualified as V
+import Data.Vector.Growable qualified as VR
+import Data.Vector.Mutable qualified as VM
+import Effectful
+import Effectful.Prim (Prim)
+import Effectful.State.Static.Local
 import GHC.Base (Any)
-import Recs.Archetype (Archetypes, Edge (..))
+import GHC.Generics (Generic)
+import Recs.Archetype (Archetype, Archetypes, Edge (..), getStore')
 import Recs.Core
 import Recs.EntityInfo (EntityInfo)
 import Recs.TypeInfo
 import Recs.Utils
-import qualified Data.Vector.Growable as VR
-import Witch (from)
-import Effectful
-import Effectful.State.Static.Local
-import Control.Monad.IO.Class (liftIO)
-import GHC.Generics (Generic)
-import Control.Lens hiding (from)
-import           Data.Generics.Labels ()
-import qualified Data.Vector.Mutable as VM
 import Unsafe.Coerce (unsafeCoerce)
-import qualified Data.Vector as V
+import Witch (from)
 
 newtype Globals = MkGlobals {unGlobals :: GIOVector Any}
-  deriving Generic
+  deriving (Generic)
 
 data World = MkWorld
   { archetypes :: Archetypes
@@ -35,32 +36,30 @@ data World = MkWorld
   , entityInfo :: EntityInfo
   , typeInfo :: TypeInfo
   }
-  deriving Generic
+  deriving (Generic)
 
-type Ecs es = (State World :> es, IOE :> es)
+type Ecs es = (State World :> es, Prim :> es, IOE :> es)
 
--- | Retrieve this type's ID from the global type registry, adding any necessary
---   information to the type registry.
---
+{- | Retrieve this type's ID from the global type registry, adding any necessary
+   information to the type registry.
+-}
+
 --   __Safety:__ This can modify all archetypes. Only safe during hard sync point.
-identified :: forall c es. (Component c, Ecs es) => Eff es TypeId
-identified = do
-  ecs <- get @World
-  case uncurry HM.lookup' (identify @c) (ecs.typeInfo.types) of
+identified :: forall c es. (Component c, Ecs es) => TypeInfo -> Eff es TypeId
+identified tInfo = do
+  case uncurry HM.lookup' (identify @c) tInfo.types of
     Just tId -> pure tId
     Nothing -> do
       let (h, f) = identify @c
-      nextTId <- liftIO $ reserveTypeId $ ecs.typeInfo
-      let pushNewTypeInfo =
-            let pushNewDict = (`V.snoc` from (mkStorageDict @(Layout c)))
-                pushId = HM.insert' h f nextTId
-              in over #typeInfo (over #storageDicts pushNewDict . over #types pushId)
-          pushNewEdges = do
-            v <- VR.fromGrowable $ ecs ^. #archetypes . #unArchetypes
-            VM.mapM_ (\a -> VR.push (a ^. #edges) (MkEdge Nothing Nothing)) v
-          pushGlobals = VR.push (ecs ^. #globals . #unGlobals) (unsafeCoerce . error $ "Tried to access missing global")
-      modify @World pushNewTypeInfo >> (liftIO $ pushNewEdges >> pushGlobals) >> pure nextTId
+      nextTId <- reserveTypeId tInfo
+      let updateTInfo =
+            let pushStorageDict = (`V.snoc` from (mkStorageDict @(Layout c)))
+                pushNewType = HM.insert' h f nextTId
+             in over #typeInfo (over #storageDicts pushStorageDict . over #types pushNewType)
+      modify @World updateTInfo >> pure nextTId
 
+getStore :: forall c es. (Component c, Ecs es) => Archetype -> Eff es (Maybe (Layout c))
+getStore arch = get >>= identified @c . typeInfo <&> getStore' arch <&> unsafeCoerce @(Maybe Any) @(Maybe (Layout c))
 
 
 

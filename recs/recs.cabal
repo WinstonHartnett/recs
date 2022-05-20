@@ -36,8 +36,10 @@ library
     Recs.Commands
     Recs.System
     Recs.World
+    Recs.Query
 
   default-extensions:
+    AllowAmbiguousTypes
     BlockArguments
     TemplateHaskell
     TypeFamilies

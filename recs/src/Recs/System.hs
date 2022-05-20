@@ -1,33 +1,19 @@
+{-# LANGUAGE DataKinds #-}
+
 module Recs.System where
 
-import Control.Monad.Catch (MonadThrow)
-import Control.Monad.State.Strict (MonadIO, MonadState, MonadTrans (lift), StateT)
 import Recs.Commands
-import Recs.World (World)
-import Control.Monad.Primitive
+import Recs.World
+import Effectful
+import Effectful.State.Static.Local
 
 -- | System-local state.
 data SystemState m = MkSystemState
-  { commands :: {-# UNPACK #-} !(Commands m)
+  { commands :: !(Commands m)
   , world :: !World
   }
 
-newtype SystemT m a = MkSystemT
-  { unSystem :: StateT (SystemState m) m a
-  }
-  deriving
-    ( Functor
-    , Applicative
-    , Monad
-    , MonadIO
-    , MonadState (SystemState m)
-    , MonadThrow
-    )
+type System m es = (State (SystemState m) :> es, Ecs es)
 
-instance PrimMonad m => PrimMonad (SystemT m) where
-  type PrimState (SystemT m) = PrimState m
-
-  primitive = MkSystemT . primitive
-
-instance MonadTrans SystemT where
-  lift = MkSystemT . lift
+runSystem :: Eff (State (SystemState m) : es) a -> Eff es (a, SystemState m)
+runSystem = runState (MkSystemState undefined undefined)

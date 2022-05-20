@@ -90,10 +90,9 @@ instance Hashable EntityId
 -- | Provide a unique hash for each type.
 class Typeable t => Identify t where
   identify :: (Hash, Fingerprint)
-  default identify :: (Hash, Fingerprint)
   --   TODO Generate these w/ TH
   identify = case typeRepFingerprint . typeRep $ Proxy @t of
-    f@(Fingerprint h _) -> (fromRight (error "Word size mismatch") (tryFrom h), f)
+    f@(Fingerprint h _) -> (fromRight (error "Word size mismatch") $ tryFrom h, f)
 
 instance Typeable t => Identify t
 

@@ -14,7 +14,6 @@ import GHC.Generics (Generic)
 import Recs.Archetype
 import Recs.Core
 import Recs.Storage
-import Recs.TypeInfo (identified)
 
 {- Type Utilities
 -}
@@ -185,20 +184,20 @@ instance (Monad m, DesugarQuery m a, DesugarQuery m b) => DesugarQuery m (a ||| 
 instance (Monad m, DesugarQuery m q) => DesugarQuery m (Not q) where
   desugarQuery = OpNot <$> desugarQuery @_ @q
 
-instance Component c => DesugarQuery m (Maybe (Nab c)) where
-  desugarQuery = OpNab . SubMaybe <$> identified @_ @c
+-- instance Component c => DesugarQuery m (Maybe (Nab c)) where
+--   desugarQuery = OpNab . SubMaybe <$> identified @_ @c
 
-instance Component c => DesugarQuery m (Maybe (Stow c)) where
-  desugarQuery = OpStow . SubMaybe <$> identified @_ @c
+-- instance Component c => DesugarQuery m (Maybe (Stow c)) where
+--   desugarQuery = OpStow . SubMaybe <$> identified @_ @c
 
-instance Component c => DesugarQuery m (Nab c) where
-  desugarQuery = OpNab . SubBase <$> identified @_ @c
+-- instance Component c => DesugarQuery m (Nab c) where
+--   desugarQuery = OpNab . SubBase <$> identified @_ @c
 
-instance Component c => DesugarQuery m (Stow c) where
-  desugarQuery = OpStow . SubBase <$> identified @_ @c
+-- instance Component c => DesugarQuery m (Stow c) where
+--   desugarQuery = OpStow . SubBase <$> identified @_ @c
 
-instance Component c => DesugarQuery m (With c) where
-  desugarQuery = OpWith <$> identified @_ @c
+-- instance Component c => DesugarQuery m (With c) where
+--   desugarQuery = OpWith <$> identified @_ @c
 
 class Queryable m q where
   query :: m q
