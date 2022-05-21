@@ -12,10 +12,13 @@ import Data.Typeable (Typeable)
 import Data.Vector.Growable qualified as VR
 import Data.Vector.Unboxed qualified as VU
 import Data.Vector.Unboxed.Deriving
-import Recs.Core
 import Recs.Utils
 import Recs.Types
 
+
+----------------------------------------------------------------------------------------------------
+-- Storage
+----------------------------------------------------------------------------------------------------
 instance Storage (GIOVector c) where
   type Elem (GIOVector c) = c
 
@@ -58,8 +61,9 @@ instance Storage (HM.HashMap EntityId c) where
 
   storageInit = pure $ HM.empty
 
-{- Component wrappers.
--}
+----------------------------------------------------------------------------------------------------
+-- Components
+----------------------------------------------------------------------------------------------------
 newtype Boxed c = MkBoxed {unBoxed :: c}
 
 instance Typeable c => Component (Boxed c) where
@@ -76,8 +80,6 @@ newtype Mapped c = MkMapped {unMapped :: c}
 
 instance Typeable c => Component (Mapped c) where
   type Layout (Mapped c) = HM.HashMap EntityId c
-
-
 
 
 

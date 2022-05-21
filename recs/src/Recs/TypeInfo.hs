@@ -13,26 +13,28 @@
 
 module Recs.TypeInfo where
 
-import Control.Lens (over)
 import Data.HashMap.Internal qualified as HMS
-import Data.Primitive.PVar (atomicModifyIntPVar)
+import Data.Primitive.PVar (atomicModifyIntPVar, readPVar)
 import Data.Vector qualified as V
 import Effectful
 import Effectful.State.Static.Local (get, modify)
-import Recs.Core
 import Recs.Types
 import Recs.Utils
 import Unsafe.Coerce (unsafeCoerce)
-import Witch hiding (over)
 
 -- | Unsafely coerce an unqualified 'SomeStorageDict' to a 'StorageDict'.
 unsafeCoerceStorageDict :: forall a. Storage a => SomeStorageDict -> StorageDict a
 unsafeCoerceStorageDict = unsafeCoerce
 
+pendingTypeId :: Ecs es => Eff es TypeId
+pendingTypeId = do
+  ecs <- get @World
+  from <$> readPVar ecs.typeInfo.nextTypeId
+
 reserveTypeId :: Ecs es => Eff es TypeId
 reserveTypeId = do
   ecs <- get @World
-  atomicModifyIntPVar ecs.typeInfo.nextTypeId \tId -> (tId + 1, tryFrom' tId)
+  atomicModifyIntPVar ecs.typeInfo.nextTypeId \tId -> (tId + 1, from tId)
 
 {- | Retrieve this type's ID from the global type registry, adding any necessary
    information to the type registry.
@@ -46,7 +48,7 @@ identified = do
       let (h, f) = identify @c
       nextTId <- reserveTypeId
       let updateTInfo =
-            let pushStorageDict = (`V.snoc` from (mkStorageDict @(Layout c)))
+            let pushStorageDict = (`V.snoc` toSomeStorageDict (mkStorageDict @(Layout c)))
                 pushNewType = HMS.insert' h f nextTId
              in over #typeInfo (over #storageDicts pushStorageDict . over #types pushNewType)
       modify @World updateTInfo

@@ -1,20 +1,31 @@
-{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Recs.Query where
 
+import Control.Applicative ((<|>))
 import Data.Hashable (Hashable)
+import Data.IntMap.Strict qualified as IM
 import Data.Kind
+import Data.Maybe (fromMaybe)
 import Data.Vector qualified as V
+import Data.Vector.Generic qualified as VG
+import Data.Vector.Growable qualified as VR
 import Data.Vector.Unboxed qualified as VU
+import Effectful (Eff, runPureEff)
+import Effectful.Reader.Static (Reader, ask, runReader)
+import Effectful.State.Static.Local (get)
 import GHC.Base (Any)
 import GHC.Generics (Generic)
 import Recs.Archetype
-import Recs.Core
-import Recs.Storage
+import Recs.TypeInfo (identified, pendingTypeId)
 import Recs.Types
+import Unsafe.Coerce (unsafeCoerce)
+import Data.Word (Word16)
+import Recs.Utils
 
 {- Type Utilities
 -}
@@ -121,10 +132,10 @@ instance Hashable QueryOperator
 
 -- | State of a query iterator.
 data QueryTraversal = MkQueryTraversal
-  { currArchId :: ArchId
-  , currArch :: Archetype
-  , matched :: V.Vector Any
-  , matchedOk :: VU.Vector Bool
+  { currArchId :: !ArchId
+  , currArch :: !Archetype
+  , matched :: !(VU.Vector Word16)
+  -- ^ Vector mapping 'TypeId' to indices into the 'currArch' stores
   }
   deriving (Generic)
 
@@ -141,6 +152,8 @@ data QueryHandle q = MkQueryHandle
   -- ^ Points to information about the currently iterated archetype.
   }
   deriving (Generic)
+
+newtype Query q = MkQuery {unQuery :: V.Vector (QueryHandle q)}
 
 newtype Global c = MkGlobal
   { unGlobal :: c
@@ -173,32 +186,128 @@ type family QueryItems q :: [Type] where
 {- | Desugar a type-level query into an isomorphic 'QueryOperator', which can be used to
    match relevant archetypes.
 -}
-class DesugarQuery m q where
-  desugarQuery :: m QueryOperator
+class DesugarQuery q where
+  desugarQuery :: Ecs es => Eff es QueryOperator
 
-instance (Monad m, DesugarQuery m a, DesugarQuery m b) => DesugarQuery m (a |&| b) where
-  desugarQuery = OpAnd <$> desugarQuery @_ @a <*> desugarQuery @_ @b
+instance (DesugarQuery a, DesugarQuery b) => DesugarQuery (a |&| b) where
+  desugarQuery = OpAnd <$> desugarQuery @a <*> desugarQuery @b
 
-instance (Monad m, DesugarQuery m a, DesugarQuery m b) => DesugarQuery m (a ||| b) where
-  desugarQuery = OpOr <$> desugarQuery @_ @a <*> desugarQuery @_ @b
+instance (DesugarQuery a, DesugarQuery b) => DesugarQuery (a ||| b) where
+  desugarQuery = OpOr <$> desugarQuery @a <*> desugarQuery @b
 
-instance (Monad m, DesugarQuery m q) => DesugarQuery m (Not q) where
-  desugarQuery = OpNot <$> desugarQuery @_ @q
+instance DesugarQuery q => DesugarQuery (Not q) where
+  desugarQuery = OpNot <$> desugarQuery @q
 
--- instance Component c => DesugarQuery m (Maybe (Nab c)) where
---   desugarQuery = OpNab . SubMaybe <$> identified @_ @c
+instance Component c => DesugarQuery (Maybe (Nab c)) where
+  desugarQuery = OpNab . SubMaybe <$> identified @c
 
--- instance Component c => DesugarQuery m (Maybe (Stow c)) where
---   desugarQuery = OpStow . SubMaybe <$> identified @_ @c
+instance Component c => DesugarQuery (Maybe (Stow c)) where
+  desugarQuery = OpStow . SubMaybe <$> identified @c
 
--- instance Component c => DesugarQuery m (Nab c) where
---   desugarQuery = OpNab . SubBase <$> identified @_ @c
+instance Component c => DesugarQuery (Nab c) where
+  desugarQuery = OpNab . SubBase <$> identified @c
 
--- instance Component c => DesugarQuery m (Stow c) where
---   desugarQuery = OpStow . SubBase <$> identified @_ @c
+instance Component c => DesugarQuery (Stow c) where
+  desugarQuery = OpStow . SubBase <$> identified @c
 
--- instance Component c => DesugarQuery m (With c) where
---   desugarQuery = OpWith <$> identified @_ @c
+instance Component c => DesugarQuery (With c) where
+  desugarQuery = OpWith <$> identified @c
 
-class Queryable m q where
-  query :: m q
+class Queryable q where
+  query :: Ecs es => Eff es q
+
+instance DesugarQuery q => Queryable (Query q) where
+  query = do
+    queryResult <- desugarQuery @q >>= runQuery
+    MkQuery <$> V.mapM undefined (unSomeQuery queryResult)
+
+instance Component c => Queryable (Global c) where
+  query = do
+    ecs <- get @World
+    globalId <- identified @c
+    unsafeCoerce @Any @(Global c) <$> VR.read ecs.globals.unGlobals (from globalId)
+
+-- | Get the return type of a function.
+type family Returns s where
+  Returns (a -> b) = Returns b
+  Returns (Eff es a) = Eff es a
+
+class Queried s where
+  queried :: Ecs es => s -> Eff es (Returns s)
+
+instance (Queryable p, Queried s) => Queried (p -> s) where
+  queried s = (s <$> query @p) >>= queried
+
+instance System es => Queried (Eff es a) where
+  queried = pure
+
+----------------------------------------------------------------------------------------------------
+-- -- | Whether an archetype is relevant given a query.
+-- --   'Nothing' implies a query has failed. 'Just a' implies that a query has succeeded,
+-- --   mapping a type to an archetype's matching component store.
+type QueryRelevant = Reader Archetype
+
+unsafeGetQueryStore :: forall c q es. (Component c, Ecs es) => QueryHandle q -> Eff es (Layout c)
+unsafeGetQueryStore qh = do
+  ident <- identified @c
+  undefined
+  -- pure $ unsafeCoerce @Any @(Layout c) $ qh.trav.matched VG.! from ident
+
+-- unsafeModifyQueryStore :: forall c q es. (Component c, Ecs es) => QueryHandle q -> (Layout c -> Eff es (Layout c)) -> Eff es ()
+-- unsafeModifyQueryStore qh f = do
+--   ident <- identified @c
+--   let target = unsafeCoerce @Any @(Layout c) $ qh.trav.matched VG.! from ident
+--   f target
+
+basicHas :: QuerySubject -> Eff '[QueryRelevant] (Maybe (IM.IntMap Any))
+basicHas qs = do
+  arch <- ask @Archetype
+  let targetStore = getStore' arch
+  pure case qs of
+    SubMaybe tId -> Just $ fromMaybe (IM.empty) $ IM.singleton (from tId) <$> targetStore tId
+    SubBase tId -> IM.singleton (from tId) <$> targetStore tId
+
+processOperator :: QueryOperator -> Eff '[QueryRelevant] (Maybe (IM.IntMap Any))
+processOperator = \case
+  OpNab qs -> basicHas qs
+  OpStow qs -> basicHas qs
+  OpWith tId -> basicHas (SubBase tId) >> pure (Just $ IM.empty)
+  OpNot qn -> maybe (Just $ IM.empty) (const Nothing) <$> processOperator qn
+  OpAnd a b -> do
+    aRes <- processOperator a
+    bRes <- processOperator b
+    pure $ IM.union <$> aRes <*> bRes
+  OpOr a b -> (<|>) <$> processOperator a <*> processOperator b
+
+runQueryOperator :: Archetype -> QueryOperator -> Maybe (IM.IntMap Any)
+runQueryOperator arch = runPureEff . runReader arch . processOperator
+
+runQueryOn :: Ecs es => QueryOperator -> V.Vector Archetype -> Eff es SomeQuery
+runQueryOn qo as = do
+  let filterArch (aId, arch) = do
+        nextTId <- pendingTypeId
+        pure do
+          queryRes <- runQueryOperator arch qo
+          let queryEntries = IM.toList queryRes
+              matched' = VG.fromList $ map (tryFrom' . fst) queryEntries
+          pure
+            MkQueryTraversal
+              { currArchId = aId
+              , currArch = arch
+              -- , matched = matched'
+              , matched = matched'
+              }
+  traversals <- VG.mapMaybeM filterArch . VG.map (over _1 (MkArchId . from)) . VG.indexed $ as
+  pure $ MkSomeQuery traversals
+
+cacheQuery :: QueryOperator -> SomeQuery -> Eff es ()
+cacheQuery = undefined
+
+runQuery :: Ecs es => QueryOperator -> Eff es SomeQuery
+runQuery qo = runQueryOn qo =<< VR.freeze . view (#archetypes . #archetypes) =<< get @World
+
+runAndCacheQuery :: Ecs es => QueryOperator -> Eff es SomeQuery
+runAndCacheQuery qo = do
+  q <- runQuery qo
+  cacheQuery qo q
+  pure q

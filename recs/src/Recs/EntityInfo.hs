@@ -27,7 +27,6 @@ import Effectful
 import Effectful.Prim (Prim)
 import Effectful.Reader.Static
 import GHC.Generics (Generic)
-import Recs.Core
 import Recs.Utils
 import Recs.Types
 import Witch hiding (over)

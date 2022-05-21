@@ -29,7 +29,6 @@ library
   other-modules:
     Recs.TypeInfo
     Recs.Utils
-    Recs.Core
     Recs.Archetype
     Recs.EntityInfo
     Recs.Storage
