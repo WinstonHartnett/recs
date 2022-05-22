@@ -20,11 +20,6 @@ import Effectful
 import Effectful.State.Static.Local (get, modify)
 import Recs.Types
 import Recs.Utils
-import Unsafe.Coerce (unsafeCoerce)
-
--- | Unsafely coerce an unqualified 'SomeStorageDict' to a 'StorageDict'.
-unsafeCoerceStorageDict :: forall a. Storage a => SomeStorageDict -> StorageDict a
-unsafeCoerceStorageDict = unsafeCoerce
 
 pendingTypeId :: Ecs es => Eff es TypeId
 pendingTypeId = do

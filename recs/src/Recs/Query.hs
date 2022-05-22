@@ -15,17 +15,19 @@ import Data.Vector qualified as V
 import Data.Vector.Generic qualified as VG
 import Data.Vector.Growable qualified as VR
 import Data.Vector.Unboxed qualified as VU
-import Effectful (Eff, runPureEff)
+import Data.Word (Word16)
+import Effectful
+import Effectful.Prim (Prim, runPrim)
 import Effectful.Reader.Static (Reader, ask, runReader)
-import Effectful.State.Static.Local (get)
+import Effectful.State.Static.Local (get, modify)
 import GHC.Base (Any)
 import GHC.Generics (Generic)
 import Recs.Archetype
 import Recs.TypeInfo (identified, pendingTypeId)
 import Recs.Types
-import Unsafe.Coerce (unsafeCoerce)
-import Data.Word (Word16)
 import Recs.Utils
+import Unsafe.Coerce (unsafeCoerce)
+import qualified Data.HashMap.Strict as HMS
 
 {- Type Utilities
 -}
@@ -78,90 +80,6 @@ type family Or a b where
   Or 'False 'True = 'True
   Or 'True 'True = 'True
   Or 'False 'False = 'False
-
-{- Query Operators
--}
-data Nab c
-
-data Stow c
-
-data Tag c
-
-data With c
-
-data Not c
-
-type Without c = Not (With c)
-
-data a |&| b
-
-infixr 4 |||
-
-data a ||| b
-
-{- Reified Query Data
--}
-
--- | Subject of a query like 'OpNab'.
-data QuerySubject
-  = -- | Component is optional. Query will not fail if missing.
-    SubMaybe !TypeId
-  | -- | Component is mandatory. Query will fail if missing.
-    SubBase !TypeId
-  deriving (Generic, Eq, Show)
-
-instance Hashable QuerySubject
-
--- TODO Allow bundled subjects
-data QueryOperator
-  = -- | Archetype has this component for read access.
-    OpNab !QuerySubject
-  | -- | Archetype has this component for write access.
-    OpStow !QuerySubject
-  | -- | Archetype must have this component.
-    OpWith !TypeId
-  | -- | Archetype must not satisfy this query.
-    OpNot !QueryOperator
-  | -- | Archetype must satisfy both queries.
-    OpAnd !QueryOperator !QueryOperator
-  | -- | Archetype must satisfy either query.
-    OpOr !QueryOperator !QueryOperator
-  deriving (Generic, Eq, Show)
-
-instance Hashable QueryOperator
-
--- | State of a query iterator.
-data QueryTraversal = MkQueryTraversal
-  { currArchId :: !ArchId
-  , currArch :: !Archetype
-  , matched :: !(VU.Vector Word16)
-  -- ^ Vector mapping 'TypeId' to indices into the 'currArch' stores
-  }
-  deriving (Generic)
-
-newtype SomeQuery = MkSomeQuery
-  { unSomeQuery :: V.Vector QueryTraversal
-  }
-  deriving (Generic)
-
--- | A query iterator.
-data QueryHandle q = MkQueryHandle
-  { entity :: (EntityId, Int)
-  -- ^ Index of current entity and its ID.
-  , trav :: QueryTraversal
-  -- ^ Points to information about the currently iterated archetype.
-  }
-  deriving (Generic)
-
-newtype Query q = MkQuery {unQuery :: V.Vector (QueryHandle q)}
-
-newtype Global c = MkGlobal
-  { unGlobal :: c
-  }
-
-newtype Local c = MkLocal
-  { unLocal :: c
-  }
 
 {- Access Control -}
 
@@ -242,69 +160,59 @@ instance System es => Queried (Eff es a) where
   queried = pure
 
 ----------------------------------------------------------------------------------------------------
--- -- | Whether an archetype is relevant given a query.
--- --   'Nothing' implies a query has failed. 'Just a' implies that a query has succeeded,
--- --   mapping a type to an archetype's matching component store.
-type QueryRelevant = Reader Archetype
+
+{- | Whether an archetype is relevant given a query.
+   'Nothing' implies a query has failed. 'Just a' implies that a query has succeeded,
+   mapping a type to an archetype's matching component store.
+-}
+type QueryRelevant es = (Reader Archetype :> es, Prim :> es)
 
 unsafeGetQueryStore :: forall c q es. (Component c, Ecs es) => QueryHandle q -> Eff es (Layout c)
-unsafeGetQueryStore qh = do
-  ident <- identified @c
-  undefined
-  -- pure $ unsafeCoerce @Any @(Layout c) $ qh.trav.matched VG.! from ident
+unsafeGetQueryStore qh = unsafeGetStore' @c qh.trav.currArch
 
--- unsafeModifyQueryStore :: forall c q es. (Component c, Ecs es) => QueryHandle q -> (Layout c -> Eff es (Layout c)) -> Eff es ()
--- unsafeModifyQueryStore qh f = do
---   ident <- identified @c
---   let target = unsafeCoerce @Any @(Layout c) $ qh.trav.matched VG.! from ident
---   f target
+unsafeModifyQueryStore :: forall c q es. (Component c, Ecs es) => QueryHandle q -> (Layout c -> Eff es ()) -> Eff es ()
+unsafeModifyQueryStore qh f = unsafeGetQueryStore @c qh >>= f
 
-basicHas :: QuerySubject -> Eff '[QueryRelevant] (Maybe (IM.IntMap Any))
+basicHas :: QueryRelevant es => QuerySubject -> Eff es Bool
 basicHas qs = do
   arch <- ask @Archetype
-  let targetStore = getStore' arch
-  pure case qs of
-    SubMaybe tId -> Just $ fromMaybe (IM.empty) $ IM.singleton (from tId) <$> targetStore tId
-    SubBase tId -> IM.singleton (from tId) <$> targetStore tId
+  case qs of
+    SubMaybe _ -> pure True
+    SubBase tId -> hasStore tId arch
 
-processOperator :: QueryOperator -> Eff '[QueryRelevant] (Maybe (IM.IntMap Any))
+processOperator :: QueryRelevant es => QueryOperator -> Eff es Bool
 processOperator = \case
   OpNab qs -> basicHas qs
   OpStow qs -> basicHas qs
-  OpWith tId -> basicHas (SubBase tId) >> pure (Just $ IM.empty)
-  OpNot qn -> maybe (Just $ IM.empty) (const Nothing) <$> processOperator qn
-  OpAnd a b -> do
-    aRes <- processOperator a
-    bRes <- processOperator b
-    pure $ IM.union <$> aRes <*> bRes
-  OpOr a b -> (<|>) <$> processOperator a <*> processOperator b
+  OpWith tId -> basicHas $ SubBase tId
+  OpNot qn -> processOperator qn
+  OpAnd a b -> (&&) <$> processOperator a <*> processOperator b
+  OpOr a b -> (||) <$> processOperator a <*> processOperator b
 
-runQueryOperator :: Archetype -> QueryOperator -> Maybe (IM.IntMap Any)
-runQueryOperator arch = runPureEff . runReader arch . processOperator
+runQueryOperator :: Prim :> es => Archetype -> QueryOperator -> Eff es Bool
+runQueryOperator arch = runReader arch . processOperator
 
-runQueryOn :: Ecs es => QueryOperator -> V.Vector Archetype -> Eff es SomeQuery
+runQueryOn :: Prim :> es => QueryOperator -> V.Vector Archetype -> Eff es SomeQuery
 runQueryOn qo as = do
   let filterArch (aId, arch) = do
-        nextTId <- pendingTypeId
-        pure do
-          queryRes <- runQueryOperator arch qo
-          let queryEntries = IM.toList queryRes
-              matched' = VG.fromList $ map (tryFrom' . fst) queryEntries
-          pure
-            MkQueryTraversal
-              { currArchId = aId
-              , currArch = arch
-              -- , matched = matched'
-              , matched = matched'
-              }
+        _ <- runQueryOperator arch qo
+        pure $ Just $ MkQueryTraversal{currArchId = aId, currArch = arch}
   traversals <- VG.mapMaybeM filterArch . VG.map (over _1 (MkArchId . from)) . VG.indexed $ as
   pure $ MkSomeQuery traversals
 
-cacheQuery :: QueryOperator -> SomeQuery -> Eff es ()
-cacheQuery = undefined
+cacheQuery :: Ecs es => QueryOperator -> SomeQuery -> Eff es ()
+cacheQuery qo sq = modify @World (over (#queryInfo . #cachedQueries) (HMS.insert qo sq))
+
+cacheQueries :: Ecs es => V.Vector (QueryOperator, SomeQuery) -> Eff es ()
+cacheQueries qs = VG.forM_ qs \(qo, sq) -> cacheQuery qo sq
 
 runQuery :: Ecs es => QueryOperator -> Eff es SomeQuery
 runQuery qo = runQueryOn qo =<< VR.freeze . view (#archetypes . #archetypes) =<< get @World
+
+runQueries :: Ecs es => V.Vector QueryOperator -> Eff es (V.Vector SomeQuery)
+runQueries qo = do
+  arches <- VR.freeze . view (#archetypes . #archetypes) =<< get @World
+  VG.forM qo (`runQueryOn` arches)
 
 runAndCacheQuery :: Ecs es => QueryOperator -> Eff es SomeQuery
 runAndCacheQuery qo = do

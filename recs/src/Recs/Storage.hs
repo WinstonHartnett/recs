@@ -3,6 +3,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Recs.Storage where
 
@@ -14,6 +15,7 @@ import Data.Vector.Unboxed qualified as VU
 import Data.Vector.Unboxed.Deriving
 import Recs.Utils
 import Recs.Types
+import Data.IORef (IORef, modifyIORef', readIORef, newIORef)
 
 
 ----------------------------------------------------------------------------------------------------
@@ -22,44 +24,47 @@ import Recs.Types
 instance Storage (GIOVector c) where
   type Elem (GIOVector c) = c
 
-  storageInsert v _ e = VR.push v e >> pure v
+  storageInsert v _ e = VR.push v e
 
   storageRemove v _ idx =
-    -- Moves the last element to fill the gap left by the 'idx' removal
-    VR.pop v >>= maybe (pure v) \e -> VR.write v idx e >> pure v
+    VR.pop v >>= \case
+      Just e -> VR.write v idx e
+      Nothing -> pure ()
 
   storageLookup v _ idx = VR.read v idx
 
-  storageModify v _ idx e = VR.write v idx e >> pure v
+  storageModify v _ idx e = VR.write v idx e
 
   storageInit = VR.new
 
 instance VU.Unbox c => Storage (GUIOVector c) where
   type Elem (GUIOVector c) = c
 
-  storageInsert v _ e = VR.push v e >> pure v
+  storageInsert v _ e = VR.push v e
 
-  storageRemove v _ idx = do
-    VR.pop v >>= maybe (pure v) \e -> VR.write v idx e >> pure v
+  storageRemove v _ idx =
+    VR.pop v >>= \case
+      Just e -> VR.write v idx e
+      Nothing -> pure ()
 
   storageLookup v _ idx = VR.read v idx
 
-  storageModify v _ idx e = VR.write v idx e >> pure v
+  storageModify v _ idx e = VR.write v idx e
 
   storageInit = VR.new
 
-instance Storage (HM.HashMap EntityId c) where
-  type Elem (HM.HashMap EntityId c) = c
+instance Storage (IORef (HM.HashMap EntityId c)) where
+  type Elem (IORef (HM.HashMap EntityId c)) = c
 
-  storageInsert h eId e = pure $ HM.insert eId e h
+  storageInsert h eId e = modifyIORef' h (HM.insert eId e)
 
-  storageRemove h eId _ = pure $ HM.delete eId h
+  storageRemove h eId _ = modifyIORef' h (HM.delete eId)
 
-  storageLookup h eId _ = pure . fromJust $ HM.lookup eId h
+  storageLookup h eId _ = readIORef h <&> fromJust . HM.lookup eId
 
-  storageModify h eId _ e = pure $ HM.insert eId e h
+  storageModify h eId _ e = modifyIORef' h (HM.insert eId e)
 
-  storageInit = pure $ HM.empty
+  storageInit = newIORef HM.empty
 
 ----------------------------------------------------------------------------------------------------
 -- Components
@@ -79,7 +84,7 @@ instance (Typeable c, VU.Unbox c) => Component (Unboxed c) where
 newtype Mapped c = MkMapped {unMapped :: c}
 
 instance Typeable c => Component (Mapped c) where
-  type Layout (Mapped c) = HM.HashMap EntityId c
+  type Layout (Mapped c) = IORef (HM.HashMap EntityId c)
 
 
 

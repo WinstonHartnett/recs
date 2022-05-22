@@ -1194,7 +1194,7 @@ createArch tIds = do
       }
   VR.push (ecs ^. #archetypes) newArch
   -- Configure archetype generations
-  untilM (\ct -> pure $ ct > VG.length tIds)
+  _ <- untilM (\ct -> pure $ ct > VG.length tIds)
     (\ct -> VR.new >>= VR.push (ecs ^. #generations) >> pure (ct + 1))
     (VR.length $ ecs ^. #generations)
   -- Add to generations list

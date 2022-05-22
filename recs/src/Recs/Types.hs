@@ -8,34 +8,41 @@ module Recs.Types where
 
 import Data.Bits (Bits (complement, shiftL, shiftR, (.&.), (.|.)))
 import Data.Coerce (coerce)
+import Data.Default (Default (def))
 import Data.Either (fromRight)
 import Data.Generics.Labels ()
 import Data.HashMap.Internal qualified as HM
 import Data.HashMap.Strict qualified as HMS
 import Data.Hashable (Hashable)
+import Data.IntMap.Strict qualified as IM
+import Data.IntSet qualified as IS
 import Data.Kind (Type)
 import Data.Maybe (fromJust, fromMaybe)
+import Data.Primitive.PVar (newPVar)
 import Data.Sequence qualified as SQ
 import Data.Typeable (Proxy (..), Typeable, typeRep, typeRepFingerprint)
 import Data.Vector qualified as V
+import Data.Vector.Generic qualified as VG
 import Data.Vector.Growable qualified as VR
 import Data.Vector.Mutable qualified as VM
 import Data.Vector.Unboxed qualified as VU
-import Data.Vector.Unboxed.Deriving
+import Data.Vector.Unboxed.Deriving (derivingUnbox)
 import Data.Word (Word16, Word32, Word64)
 import Effectful
 import Effectful.Prim (Prim)
 import Effectful.State.Static.Local
-import GHC.Base (Any)
+import GHC.Base (Any, liftM)
 import GHC.Fingerprint (Fingerprint (..))
 import GHC.Generics (Generic)
 import Recs.Utils
 import Unsafe.Coerce (unsafeCoerce)
 import Witch (From (..), TryFrom (tryFrom))
-import qualified Data.IntMap.Strict as IM
 
 newtype Globals = MkGlobals {unGlobals :: GIOVector Any}
   deriving (Generic)
+
+instance {-# OVERLAPPING #-} Default (IO Globals) where
+  def = MkGlobals <$> VR.new
 
 ----------------------------------------------------------------------------------------------------
 -- Core
@@ -43,20 +50,25 @@ newtype Globals = MkGlobals {unGlobals :: GIOVector Any}
 
 -- | Unique ID of a type known by the ECS.
 newtype TypeId = MkTypeId Int
-  deriving (Generic, Eq, Ord, Show)
+  deriving (Generic, Eq, Ord, Show, Hashable)
 
 derivingUnbox "TypeId" [t|TypeId -> Int|] [|\(MkTypeId w) -> w|] [|MkTypeId|]
+
+instance From TypeId Int
+
+instance From Int TypeId
 
 invalidTypeId :: TypeId
 invalidTypeId = from @Int (-1)
 
-instance From TypeId Int where
-  -- from (MkTypeId w) = from w
-
-instance From Int TypeId where
-  -- tryFrom i = coerce (MkTypeId <$> tryFrom i)
-
-instance Hashable TypeId
+-- TODO This sucks o-wise
+typeIdDiff :: VU.Vector TypeId -> VU.Vector TypeId -> VU.Vector TypeId
+typeIdDiff a b =
+  let buildISet = IS.fromDistinctAscList . VG.toList . VG.map from
+      a' = buildISet a
+      b' = buildISet b
+   in VG.map (MkTypeId . fromIntegral) . VG.fromList . IS.toList $
+        IS.union a' b' `IS.difference` IS.intersection a' b'
 
 -- | Unique ID of an Archetype.
 newtype ArchId = MkArchId Int
@@ -115,20 +127,20 @@ class Storage a where
   type Elem a
 
   -- | Add a new row with a given entity.
-  storageInsert :: a -> EntityId -> Elem a -> IO a
+  storageInsert :: a -> EntityId -> Elem a -> IO ()
 
   -- | Remove a row at the given index.
   --   This performs a swap-remove on the store-level with the last element.
   --
   --   __Safety:__ the corresponding archetype entity entry must be immediately updated
   --   to reflect the swap-remove.
-  storageRemove :: a -> EntityId -> Int -> IO a
+  storageRemove :: a -> EntityId -> Int -> IO ()
 
   -- | Lookup the row at the given index.
   storageLookup :: a -> EntityId -> Int -> IO (Elem a)
 
   -- | Write a new element to the given index.
-  storageModify :: a -> EntityId -> Int -> Elem a -> IO a
+  storageModify :: a -> EntityId -> Int -> Elem a -> IO ()
 
   -- | Instantiate a collection of the given type.
   storageInit :: IO a
@@ -181,34 +193,42 @@ data EntityInfo = MkEntityInfo
   }
   deriving (Generic)
 
+instance {-# OVERLAPPING #-} Default (IO EntityInfo) where
+  def = do
+    records <- VR.new
+    pending <- VR.new
+    freeCursor <- newPVar 0
+    len <- newPVar 0
+    pure
+      MkEntityInfo
+        { records = records
+        , pending = pending
+        , freeCursor = freeCursor
+        , len = len
+        }
+
 ----------------------------------------------------------------------------------------------------
 -- Type Information
 ----------------------------------------------------------------------------------------------------
 
--- data SomeStorageDict = MkSomeStorageDict
---   { _storageInsert :: Any -> EntityId -> Any -> Any Any
---   , _storageRemove :: Any -> EntityId -> Int -> Any Any
---   , _storageLookup :: Any -> EntityId -> Int -> Any Any
---   , _storageModify :: Any -> EntityId -> Int -> Any -> Any Any
---   , _storageInit :: !(Any Any)
---   }
-
 data StorageDict s = MkStorageDict
-  { _storageInsert :: s -> EntityId -> Elem s -> IO s
-  , _storageRemove :: s -> EntityId -> Int -> IO s
+  { _storageInsert :: s -> EntityId -> Elem s -> IO ()
+  , _storageRemove :: s -> EntityId -> Int -> IO ()
   , _storageLookup :: s -> EntityId -> Int -> IO (Elem s)
-  , _storageModify :: s -> EntityId -> Int -> Elem s -> IO s
+  , _storageModify :: s -> EntityId -> Int -> Elem s -> IO ()
   , _storageInit :: !(IO s)
   }
-  deriving Generic
+  deriving (Generic)
 
 type SomeStorageDict = StorageDict Any
 
+-- | Convert a 'StorageDict' to an untyped 'SomeStorageDict'.
 toSomeStorageDict :: forall s. StorageDict s -> SomeStorageDict
 toSomeStorageDict = unsafeCoerce @(StorageDict s) @SomeStorageDict
 
--- instance From (StorageDict s) SomeStorageDict where
---   from = unsafeCoerce @(StorageDict s) @SomeStorageDict
+-- | Unsafely coerce an unqualified 'SomeStorageDict' to a 'StorageDict'.
+unsafeToStorageDict :: forall a. Storage a => SomeStorageDict -> StorageDict a
+unsafeToStorageDict = unsafeCoerce
 
 -- | Reify a 'Storage' instance.
 mkStorageDict :: forall a. Storage a => StorageDict a
@@ -228,6 +248,16 @@ data TypeInfo = MkTypeInfo
   , storageDicts :: !(V.Vector SomeStorageDict)
   }
   deriving (Generic)
+
+instance {-# OVERLAPPING #-} Default (IO TypeInfo) where
+  def = do
+    nextTypeId <- newPVar 0
+    pure
+      MkTypeInfo
+        { nextTypeId = nextTypeId
+        , types = HMS.empty
+        , storageDicts = V.empty
+        }
 
 ----------------------------------------------------------------------------------------------------
 -- Archetypes
@@ -256,7 +286,8 @@ derivingUnbox
     |]
 
 data Archetype = MkArch
-  { components :: {-# UNPACK #-} !(Vector Any)
+  { archId :: !ArchId
+  , components :: {-# UNPACK #-} !(Vector Any)
   -- ^ Untyped component stores.
   , entities :: {-# UNPACK #-} !(GUIOVector EntityId)
   -- ^ Entities (in order of storage).
@@ -265,13 +296,27 @@ data Archetype = MkArch
   , typeMap :: {-# UNPACK #-} !(GUIOVector Int)
   -- ^ Vector indexed by 'TypeId' pointing to the relevant store's index.
   , edges :: {-# UNPACK #-} !(GUIOVector Edge)
+  -- ^ Edges in the 'Archetype' graph.
   }
   deriving (Generic)
 
 data Archetypes = MkArchetypes
-  { archetypes  :: {-# UNPACK #-} !(GIOVector Archetype)
+  { archetypes :: {-# UNPACK #-} !(GIOVector Archetype)
+  , graph :: GIOVector (GUIOVector ArchId)
   }
   deriving (Generic)
+
+instance {-# OVERLAPPING #-} Default (IO Archetypes) where
+  def = do
+    archetypes <- VR.new
+    graph <- VR.thaw =<< liftM (VG.singleton) (VR.thaw [MkArchId 0])
+    pure
+      MkArchetypes
+        { archetypes = archetypes
+        , graph = graph
+        }
+
+data ArchetypeSearch = Add !(VU.Vector TypeId) | Remove !(VU.Vector TypeId)
 
 ----------------------------------------------------------------------------------------------------
 -- Commands
@@ -304,6 +349,106 @@ type CommandBuilder es = State (EntityCommands es)
 
 newtype Commands es = MkCommands {unCommands :: SQ.Seq (EntityCommands es)}
 
+instance Default (Commands es) where
+  def =
+    MkCommands
+      { unCommands = SQ.empty
+      }
+
+----------------------------------------------------------------------------------------------------
+-- Queries
+----------------------------------------------------------------------------------------------------
+
+{- Query Operators
+-}
+data Nab c
+
+data Stow c
+
+data Tag c
+
+data With c
+
+data Not c
+
+type Without c = Not (With c)
+
+data a |&| b
+
+infixr 4 |||
+
+data a ||| b
+
+{- Reified Query Data
+-}
+
+-- | Subject of a query like 'OpNab'.
+data QuerySubject
+  = -- | Component is optional. Query will not fail if missing.
+    SubMaybe !TypeId
+  | -- | Component is mandatory. Query will fail if missing.
+    SubBase !TypeId
+  deriving (Generic, Eq, Show)
+
+instance Hashable QuerySubject
+
+-- TODO Allow bundled subjects
+data QueryOperator
+  = -- | Archetype has this component for read access.
+    OpNab !QuerySubject
+  | -- | Archetype has this component for write access.
+    OpStow !QuerySubject
+  | -- | Archetype must have this component.
+    OpWith !TypeId
+  | -- | Archetype must not satisfy this query.
+    OpNot !QueryOperator
+  | -- | Archetype must satisfy both queries.
+    OpAnd !QueryOperator !QueryOperator
+  | -- | Archetype must satisfy either query.
+    OpOr !QueryOperator !QueryOperator
+  deriving (Generic, Eq, Show)
+
+instance Hashable QueryOperator
+
+-- | State of a query iterator.
+data QueryTraversal = MkQueryTraversal
+  { currArchId :: !ArchId
+  , currArch :: !Archetype
+  }
+  deriving (Generic)
+
+newtype SomeQuery = MkSomeQuery
+  { unSomeQuery :: V.Vector QueryTraversal
+  }
+  deriving (Generic)
+
+-- | A query iterator.
+data QueryHandle q = MkQueryHandle
+  { entity :: (EntityId, Int)
+  -- ^ Index of current entity and its ID.
+  , trav :: QueryTraversal
+  -- ^ Points to information about the currently iterated archetype.
+  }
+  deriving (Generic)
+
+newtype Query q = MkQuery {unQuery :: V.Vector (QueryHandle q)}
+
+newtype Global c = MkGlobal
+  { unGlobal :: c
+  }
+
+newtype Local c = MkLocal
+  { unLocal :: c
+  }
+
+data QueryInfo = MkQueryInfo
+  { cachedQueries :: HMS.HashMap QueryOperator SomeQuery
+  }
+  deriving (Generic)
+
+instance {-# OVERLAPPING #-}Default QueryInfo where
+  def = MkQueryInfo { cachedQueries = HMS.empty }
+
 ----------------------------------------------------------------------------------------------------
 -- Commands
 ----------------------------------------------------------------------------------------------------
@@ -317,11 +462,16 @@ data SystemState es = MkSystemState
 type System es = (State (SystemState es) :> es, Ecs es)
 
 data World = MkWorld
-  { archetypes :: Archetypes
-  , globals :: Globals
-  , entityInfo :: EntityInfo
-  , typeInfo :: TypeInfo
+  { archetypes :: !Archetypes
+  , globals :: !Globals
+  , entityInfo :: !EntityInfo
+  , typeInfo :: !TypeInfo
+  , queryInfo :: !QueryInfo
   }
   deriving (Generic)
 
 type Ecs es = (State World :> es, Prim :> es, IOE :> es)
+
+instance {-# OVERLAPPING #-} Default (IO World) where
+  def = do
+    undefined

@@ -82,7 +82,19 @@ executable recs-examples
       , linear
       , vector-th-unbox
       , effectful
+      , ghc-datasize
+      , ghc-prim
     hs-source-dirs:   app
+    ghc-options:
+      -ddump-simpl
+      -ddump-to-file
+      -freverse-errors
+      -fexpose-all-unfoldings
+      -fspecialise-aggressively
+      -flate-specialise
+      -fasm-shortcutting
+      -fstatic-argument-transformation
+
     -- ghc-options:      -rtsopts -with-rtsopts=-p
     -- ghc-options:
     --   -freverse-errors
