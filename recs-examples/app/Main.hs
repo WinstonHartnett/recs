@@ -6,7 +6,8 @@
 
 module Main where
 
-import Recs.Lib
+-- import Recs.Lib
+import Recs
 import qualified Data.Vector.Unboxed as VU
 -- import Control.Monad.State.Strict
 import Data.Maybe (fromJust)

@@ -9,11 +9,9 @@ import Data.Vector qualified as V
 import Data.Vector.Algorithms.Heap qualified as V
 import Data.Vector.Generic qualified as VG
 import Data.Vector.Growable qualified as VR
-import Data.Vector.Mutable qualified as VGM
 import Data.Vector.Unboxed qualified as VU
 import Effectful
 import Effectful.Prim (Prim)
-import Effectful.Resource (register)
 import Effectful.State.Static.Local (get)
 import GHC.Base (Any)
 import Recs.TypeInfo (identified, pendingTypeId)
@@ -109,8 +107,9 @@ readGeneration gen = get @World >>= (`VR.read` gen) . view (#archetypes . #graph
 archetypeGeneration :: Archetype -> Int
 archetypeGeneration arch = VG.length $ arch.types
 
--- | Populate archetype edges from previous-generation archetypes to this archetype,
---   and from this archetype to next-generation archetypes.
+{- | Populate archetype edges from previous-generation archetypes to this archetype,
+   and from this archetype to next-generation archetypes.
+-}
 populateEdges :: Ecs es => Archetype -> Eff es ()
 populateEdges arch = do
   ecs <- get @World
@@ -127,9 +126,11 @@ populateEdges arch = do
           . VG.convert @_ @_ @V.Vector
           $ frozenGen
   let write direction thisDirection (archId', arch') = do
-        let [diff] = arch.types `typeIdDiff` arch.types
+        let diff = case arch.types `typeIdDiff` arch.types of
+              [i] -> i
+              _ -> undefined
         VR.modify arch'.edges (set direction (Just arch.archId)) (from diff)
-        VR.modify arch.edges  (set thisDirection (Just archId')) (from diff)
+        VR.modify arch.edges (set thisDirection (Just archId')) (from diff)
   unless (nextGen >= genCt) (getGeneration nextGen >>= VG.mapM_ (write #remove #add))
   unless (prevGen < 0) (getGeneration prevGen >>= VG.mapM_ (write #add #remove))
 

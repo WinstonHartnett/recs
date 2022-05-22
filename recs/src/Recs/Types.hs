@@ -7,27 +7,24 @@
 module Recs.Types where
 
 import Data.Bits (Bits (complement, shiftL, shiftR, (.&.), (.|.)))
-import Data.Coerce (coerce)
 import Data.Default (Default (def))
 import Data.Either (fromRight)
 import Data.Generics.Labels ()
 import Data.HashMap.Internal qualified as HM
 import Data.HashMap.Strict qualified as HMS
 import Data.Hashable (Hashable)
-import Data.IntMap.Strict qualified as IM
 import Data.IntSet qualified as IS
 import Data.Kind (Type)
-import Data.Maybe (fromJust, fromMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Primitive.PVar (newPVar)
 import Data.Sequence qualified as SQ
 import Data.Typeable (Proxy (..), Typeable, typeRep, typeRepFingerprint)
 import Data.Vector qualified as V
 import Data.Vector.Generic qualified as VG
 import Data.Vector.Growable qualified as VR
-import Data.Vector.Mutable qualified as VM
 import Data.Vector.Unboxed qualified as VU
 import Data.Vector.Unboxed.Deriving (derivingUnbox)
-import Data.Word (Word16, Word32, Word64)
+import Data.Word (Word32, Word64)
 import Effectful
 import Effectful.Prim (Prim)
 import Effectful.State.Static.Local
@@ -36,7 +33,6 @@ import GHC.Fingerprint (Fingerprint (..))
 import GHC.Generics (Generic)
 import Recs.Utils
 import Unsafe.Coerce (unsafeCoerce)
-import Witch (From (..), TryFrom (tryFrom))
 
 newtype Globals = MkGlobals {unGlobals :: GIOVector Any}
   deriving (Generic)
@@ -446,8 +442,8 @@ data QueryInfo = MkQueryInfo
   }
   deriving (Generic)
 
-instance {-# OVERLAPPING #-}Default QueryInfo where
-  def = MkQueryInfo { cachedQueries = HMS.empty }
+instance {-# OVERLAPPING #-} Default QueryInfo where
+  def = MkQueryInfo{cachedQueries = HMS.empty}
 
 ----------------------------------------------------------------------------------------------------
 -- Commands
@@ -474,4 +470,16 @@ type Ecs es = (State World :> es, Prim :> es, IOE :> es)
 
 instance {-# OVERLAPPING #-} Default (IO World) where
   def = do
-    undefined
+    archetypes <- def
+    globals <- def
+    entityInfo <- def
+    typeInfo <- def
+    queryInfo <- def
+    pure
+      MkWorld
+        { archetypes = archetypes
+        , globals = globals
+        , entityInfo = entityInfo
+        , typeInfo = typeInfo
+        , queryInfo = queryInfo
+        }

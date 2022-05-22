@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Wno-unused-top-binds #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE DataKinds #-}
@@ -21,15 +22,9 @@ module Recs.EntityInfo (
 import Control.Monad (forM_, unless)
 import Data.Primitive.PVar (atomicReadIntPVar, atomicSubIntPVar, modifyPVar_, readPVar, writePVar)
 import Data.Vector.Growable qualified as VR
-import Data.Vector.Unboxed.Deriving
-import Data.Word
 import Effectful
-import Effectful.Prim (Prim)
-import Effectful.Reader.Static
-import GHC.Generics (Generic)
 import Recs.Utils
 import Recs.Types
-import Witch hiding (over)
 import Effectful.State.Static.Local (get)
 
 {- | Concurrently reserve a new 'EntityId'.

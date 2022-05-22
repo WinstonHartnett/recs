@@ -27,15 +27,15 @@ library
 
   -- Modules included in this library but not exported.
   other-modules:
-    Recs.TypeInfo
-    Recs.Utils
     Recs.Archetype
-    Recs.EntityInfo
-    Recs.Storage
     Recs.Commands
-    Recs.System
-    Recs.Types
+    Recs.EntityInfo
     Recs.Query
+    Recs.Storage
+    Recs.System
+    Recs.TypeInfo
+    Recs.Types
+    Recs.Utils
 
   default-extensions:
     AllowAmbiguousTypes

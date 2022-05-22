@@ -6,24 +6,17 @@
 
 module Recs.Query where
 
-import Control.Applicative ((<|>))
-import Data.Hashable (Hashable)
-import Data.IntMap.Strict qualified as IM
 import Data.Kind
-import Data.Maybe (fromMaybe)
 import Data.Vector qualified as V
 import Data.Vector.Generic qualified as VG
 import Data.Vector.Growable qualified as VR
-import Data.Vector.Unboxed qualified as VU
-import Data.Word (Word16)
 import Effectful
-import Effectful.Prim (Prim, runPrim)
+import Effectful.Prim (Prim)
 import Effectful.Reader.Static (Reader, ask, runReader)
 import Effectful.State.Static.Local (get, modify)
 import GHC.Base (Any)
-import GHC.Generics (Generic)
 import Recs.Archetype
-import Recs.TypeInfo (identified, pendingTypeId)
+import Recs.TypeInfo (identified)
 import Recs.Types
 import Recs.Utils
 import Unsafe.Coerce (unsafeCoerce)

@@ -6,7 +6,6 @@ module Recs.System where
 import Control.Lens hiding (from)
 import Effectful
 import Effectful.State.Static.Local
-import Recs.Archetype (unsafeGetStore)
 import Recs.Query (In, QueryItems, Queryable, unsafeGetQueryStore, unsafeModifyQueryStore)
 import Recs.Types
 
