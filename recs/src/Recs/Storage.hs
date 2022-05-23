@@ -16,6 +16,7 @@ import Data.Vector.Unboxed.Deriving
 import Recs.Utils
 import Recs.Types
 import Data.IORef (IORef, modifyIORef', readIORef, newIORef)
+import qualified Data.HashMap.Strict as HMS
 
 
 ----------------------------------------------------------------------------------------------------
@@ -81,10 +82,19 @@ derivingUnbox "Unboxed" [t|forall c. VU.Unbox c => Unboxed c -> c|] [|\(MkUnboxe
 instance (Typeable c, VU.Unbox c) => Component (Unboxed c) where
   type Layout (Unboxed c) = GUIOVector (Unboxed c)
 
-newtype Mapped c = MkMapped {unMapped :: c}
+-- newtype Mapped c = MkMapped {unMapped :: c}
 
-instance Typeable c => Component (Mapped c) where
-  type Layout (Mapped c) = IORef (HM.HashMap EntityId c)
+-- newtype MappedStore c = MkMappedStore { unMappedStore :: (HMS.HashMap EntityId c) }
+
+-- instance Storage (IORef (MappedStore c)) where
+--   type Elem (IORef (MappedStore c)) = c
+
+
+-- instance Typeable c => Component (Mapped c) where
+--   type Layout (Mapped c) = IORef (MappedStore c)
+
+-- instance Typeable c => Component (Mapped c) where
+--   type Layout (Mapped c) = IORef (HM.HashMap EntityId c)
 
 
 

@@ -17,6 +17,7 @@ module Recs.EntityInfo (
   reserveEntityId,
   freeEntityId,
   verifyFlushedEntities,
+  getEntityMeta
 ) where
 
 import Control.Monad (forM_, unless)
@@ -26,6 +27,17 @@ import Effectful
 import Recs.Utils
 import Recs.Types
 import Effectful.State.Static.Local (get)
+
+getEntityMeta :: Ecs es => EntityId -> Eff es EntityMeta
+getEntityMeta eId = do
+  ecs <- get @World
+  VR.read ecs.entityInfo.records (from eId)
+
+getArchFromEntityId :: Ecs es => EntityId -> Eff es Archetype
+getArchFromEntityId eId = do
+  ecs <- get @World
+  meta <- getEntityMeta eId
+  VR.read ecs.archetypes.archetypes $ from meta.location.archId
 
 {- | Concurrently reserve a new 'EntityId'.
 

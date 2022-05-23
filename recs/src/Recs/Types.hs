@@ -63,8 +63,7 @@ typeIdDiff a b =
   let buildISet = IS.fromDistinctAscList . VG.toList . VG.map from
       a' = buildISet a
       b' = buildISet b
-   in VG.map (MkTypeId . fromIntegral) . VG.fromList . IS.toList $
-        IS.union a' b' `IS.difference` IS.intersection a' b'
+   in VG.map (MkTypeId . fromIntegral) . VG.fromList . IS.toList $ intSetDiff a' b'
 
 -- | Unique ID of an Archetype.
 newtype ArchId = MkArchId Int
@@ -146,7 +145,7 @@ class Storage a where
    Storage defaults to 'Unboxed' for performance reasons. You must derive
    'Component via Boxed' if you want Boxed storage.
 -}
-class (Storage (Layout c), Identify c) => Component (c :: Type) where
+class (Storage (Layout c), Elem (Layout c) ~ c, Identify c) => Component (c :: Type) where
   type Layout c
 
 ----------------------------------------------------------------------------------------------------
@@ -325,27 +324,29 @@ data ArchetypeMove
       }
   | SameArchetype {-# UNPACK #-} !EntityRecord
 
-data Command es
+data Command
   = MkTag
       { fingerprint :: !Fingerprint
-      , commit :: !(World -> Eff es ())
+      , commit :: !(ArchetypeMove -> Ecs' ())
       }
   | MkUntag
       { fingerprint :: !Fingerprint
-      , commit :: !(World -> Eff es ())
+      , commit :: !(ArchetypeMove -> Ecs' ())
       }
-  | Despawn
+  | MkDespawn
 
-data EntityCommands es = MkEntityCommands
+data EntityCommands = MkEntityCommands
   { entityId :: !EntityId
-  , queue :: SQ.Seq (Command es)
+  , queue :: SQ.Seq Command
   }
+  deriving Generic
 
-type CommandBuilder es = State (EntityCommands es)
+type CommandBuilderE es = State EntityCommands
 
-newtype Commands es = MkCommands {unCommands :: SQ.Seq (EntityCommands es)}
+newtype Commands = MkCommands {unCommands :: SQ.Seq EntityCommands}
+  deriving (Generic)
 
-instance Default (Commands es) where
+instance Default Commands where
   def =
     MkCommands
       { unCommands = SQ.empty
@@ -450,12 +451,12 @@ instance {-# OVERLAPPING #-} Default QueryInfo where
 ----------------------------------------------------------------------------------------------------
 
 -- | System-local state.
-data SystemState es = MkSystemState
-  { commands :: !(Commands es)
-  , world :: !World
+data SystemState = MkSystemState
+  { commands :: !Commands
   }
+  deriving Generic
 
-type System es = (State (SystemState es) :> es, Ecs es)
+type System es = (State SystemState :> es, Ecs es)
 
 data World = MkWorld
   { archetypes :: !Archetypes
@@ -466,7 +467,9 @@ data World = MkWorld
   }
   deriving (Generic)
 
-type Ecs es = (State World :> es, Prim :> es, IOE :> es)
+type Ecs es = '[State World, Prim, IOE] :>> es
+
+type Ecs' = Eff '[State World, Prim, IOE]
 
 instance {-# OVERLAPPING #-} Default (IO World) where
   def = do

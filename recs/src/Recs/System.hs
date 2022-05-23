@@ -8,11 +8,10 @@ import Effectful
 import Effectful.State.Static.Local
 import Recs.Query (In, QueryItems, Queryable, unsafeGetQueryStore, unsafeModifyQueryStore)
 import Recs.Types
+import Data.Default (Default(def))
 
-runSystem :: Ecs es => Eff (State (SystemState m) : es) a -> Eff es (a, SystemState m)
-runSystem sys = do
-  ecs <- get @World
-  runState (MkSystemState undefined ecs) sys
+runSystem :: Eff (State SystemState : es) a -> Eff es (a, SystemState)
+runSystem = runState (MkSystemState def)
 
 -- | Ensure that this system's types are known by the ECS.
 registerSystemTypes :: Ecs es => Queryable q => q -> Eff es ()

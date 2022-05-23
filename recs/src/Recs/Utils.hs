@@ -9,6 +9,7 @@ import Data.Vector.Mutable qualified as VM
 import Data.Vector.Unboxed qualified as VU
 import Data.Vector.Unboxed.Mutable qualified as VUM
 import Data.Generics.Labels ()
+import qualified Data.IntSet as IS
 
 import Witch (From (..), TryFrom (..))
 
@@ -34,3 +35,6 @@ tryFrom' :: TryFrom a b => a -> b
 tryFrom' = fromRight undefined . tryFrom
 
 type IOPVar a = PVar a RealWorld
+
+intSetDiff :: IS.IntSet -> IS.IntSet -> IS.IntSet
+intSetDiff a b = IS.union a b `IS.difference` IS.intersection a b

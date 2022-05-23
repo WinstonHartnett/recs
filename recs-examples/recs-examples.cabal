@@ -84,6 +84,7 @@ executable recs-examples
       , effectful
       , ghc-datasize
       , ghc-prim
+      , data-vector-growable
     hs-source-dirs:   app
     ghc-options:
       -ddump-simpl

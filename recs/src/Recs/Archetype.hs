@@ -65,6 +65,9 @@ hasStore tId arch = do
   idx <- VR.read arch.typeMap $ coerce tId
   pure $ idx == (-1)
 
+getArchByArchId :: Ecs es => ArchId -> Eff es Archetype
+getArchByArchId aId = get @World >>= \ecs -> VR.read ecs.archetypes.archetypes (from aId)
+
 getStoreByIdx :: Archetype -> Int -> Maybe Any
 getStoreByIdx arch idx = arch.components VG.!? idx
 
@@ -82,6 +85,9 @@ unsafeGetStore arch = identified @c >>= getStoreByTypeId arch <&> unsafeCoerce @
 
 unsafeGetStore' :: forall c es. (Component c, Ecs es) => Archetype -> Eff es (Layout c)
 unsafeGetStore' arch = identified @c >>= getStoreByTypeId' arch <&> unsafeCoerce @Any @(Layout c)
+
+nextIdx :: Ecs es => Archetype -> Eff es Int
+nextIdx arch = VR.length arch.entities
 
 {- | Ensure that the Archetype graph has a corresponding entry for Archetypes of
    length 'nTypes'.
