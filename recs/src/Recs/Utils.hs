@@ -38,3 +38,9 @@ type IOPVar a = PVar a RealWorld
 
 intSetDiff :: IS.IntSet -> IS.IntSet -> IS.IntSet
 intSetDiff a b = IS.union a b `IS.difference` IS.intersection a b
+
+instance From [a] (V.Vector a) where
+  from = V.fromList
+
+instance VU.Unbox a => From [a] (VU.Vector a) where
+  from = VU.fromList

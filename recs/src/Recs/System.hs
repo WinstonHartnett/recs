@@ -14,7 +14,7 @@ runSystem :: Eff (State SystemState : es) a -> Eff es (a, SystemState)
 runSystem = runState (MkSystemState def)
 
 -- | Ensure that this system's types are known by the ECS.
-registerSystemTypes :: Ecs es => Queryable q => q -> Eff es ()
+registerSystemTypes :: (Ecs es, Queryable q) => q -> Eff es ()
 registerSystemTypes = undefined
 
 nab ::

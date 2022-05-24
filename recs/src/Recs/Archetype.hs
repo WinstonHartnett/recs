@@ -12,7 +12,7 @@ import Data.Vector.Growable qualified as VR
 import Data.Vector.Unboxed qualified as VU
 import Effectful
 import Effectful.Prim (Prim)
-import Effectful.State.Static.Local (get)
+import Effectful.State.Static.Local (get, modify)
 import GHC.Base (Any)
 import Recs.TypeInfo (identified, pendingTypeId)
 import Recs.Types
@@ -183,3 +183,34 @@ traverseArch root search = do
 
 traverseRoot :: Ecs es => ArchetypeSearch -> Eff es Archetype
 traverseRoot as = (`traverseArch` as) =<< emptyArch
+
+{- | Allocate a new entity into an archetype and updates the requisite stores to match.
+
+   __Safety:__
+
+     * not thread-safe
+
+     * the new 'ArchRecord' must be immediately registered with
+       'EntityInfo'
+-}
+allocateEntity ::
+  Ecs es =>
+  Archetype ->
+  EntityId ->
+  V.Vector (Archetype -> EntityId -> Int -> ArchetypeMove -> Eff es ()) ->
+  Eff es EntityRecord
+allocateEntity a eId commitHooks = do
+  idx <- VR.length (a ^. #entities) <* VR.push (a ^. #entities) eId
+  let entityRecord =
+        MkEntityRecord
+          { archId = a ^. #archId
+          , idx = idx
+          }
+  get @World >>= \ecs -> VR.push ecs.entityInfo.records $ MkEntityMeta { generation = 0, location = entityRecord }
+  V.forM_ commitHooks \commitFn -> commitFn a eId idx (MovedArchetype undefined undefined)
+  pure entityRecord
+
+allocateEntityIntoEmpty :: Ecs es => EntityId -> Eff es EntityRecord
+allocateEntityIntoEmpty eId = do
+  emptyArch' <- emptyArch
+  allocateEntity emptyArch' eId []

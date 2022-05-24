@@ -38,6 +38,7 @@ import GHC.Prim (sizeofArray#, sizeofByteArray#)
 import Linear.Matrix
 import Linear.V3
 import Linear.V4
+import qualified Data.Sequence as SQ
 
 newtype Velocity = MkVelocity (V3 Float)
 
@@ -224,17 +225,19 @@ modifyF = go 100000
 testWorld :: IO ()
 testWorld = do
   wld <- def @(IO World)
-  t <- runEff . runPrim . runState wld $ do
-    sysState <- runSystem do
-      (_, entityCommands) <- runCommandBuilder undefined do
+  (_, wld') <- runEff . runPrim . runState wld $ do
+    (_, ss) <- runSystem do
+      spawn do
         tagged $ MkPosition $ V3 0.0 0.0 0.0
         tagged $ MkVelocity $ V3 1.0 0.0 0.0
-      forM_ entityCommands.queue \com -> com.commit undefined
-    undefined
-  undefined
+    flushEntities \eId er -> allocateEntityIntoEmpty eId
+    commitCommands ss.commands
+  putStrLn "test"
+  -- let c = ss.commands.unCommands
+  -- putStrLn $ show $ length $ queue . fromJust $ SQ.lookup 0 c
 
 main :: IO ()
-main = undefined
+main = testWorld
 
 -- main = putStrLn . show $ I# (closureSize# (1 :: Int, 1 :: Int))
 -- case unpackClosure# (1 :: Int, 1 :: Int) of

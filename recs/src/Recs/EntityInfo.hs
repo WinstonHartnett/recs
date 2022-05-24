@@ -11,14 +11,7 @@
 {-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Recs.EntityInfo (
-  EntityRecord,
-  EntityInfo,
-  reserveEntityId,
-  freeEntityId,
-  verifyFlushedEntities,
-  getEntityMeta
-) where
+module Recs.EntityInfo where
 
 import Control.Monad (forM_, unless)
 import Data.Primitive.PVar (atomicReadIntPVar, atomicSubIntPVar, modifyPVar_, readPVar, writePVar)

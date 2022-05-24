@@ -303,7 +303,20 @@ data Archetypes = MkArchetypes
 
 instance {-# OVERLAPPING #-} Default (IO Archetypes) where
   def = do
-    archetypes <- VR.new
+    emptyArch' <- do
+      entities' <- VR.new
+      typeMap' <- VR.new
+      edges' <- VR.new
+      pure
+        MkArch
+          { archId = from @Int 0
+          , components = V.empty
+          , entities = entities'
+          , types = VU.empty
+          , typeMap = typeMap'
+          , edges = edges'
+          }
+    archetypes <- VR.thaw [emptyArch']
     graph <- VR.thaw =<< liftM (VG.singleton) (VR.thaw [MkArchId 0])
     pure
       MkArchetypes
@@ -327,21 +340,43 @@ data ArchetypeMove
 data Command
   = MkTag
       { fingerprint :: !Fingerprint
-      , commit :: !(ArchetypeMove -> Ecs' ())
+      , storageDict :: SomeStorageDict
+      , commit :: (ArchetypeMove -> Ecs' ())
       }
   | MkUntag
       { fingerprint :: !Fingerprint
-      , commit :: !(ArchetypeMove -> Ecs' ())
+      , storageDict :: SomeStorageDict
+      , commit :: (ArchetypeMove -> Ecs' ())
       }
-  | MkDespawn
+
+data CommandVariant
+  = MkSpawned {unCommandVariant :: SQ.Seq Command}
+  | MkOperated {unCommandVariant :: SQ.Seq Command}
+  | MkDespawned
+  deriving (Generic)
+
+instance Semigroup CommandVariant where
+  cv1 <> cv2 =
+    case cv1 of
+      MkSpawned s1 ->
+        case cv2 of
+          MkSpawned s2 -> MkSpawned (s1 <> s2)
+          MkOperated m2 -> MkSpawned (s1 <> m2)
+          MkDespawned -> MkDespawned
+      MkOperated m1 ->
+        case cv2 of
+          MkSpawned s2 -> MkSpawned (m1 <> s2)
+          MkOperated m2 -> MkOperated (m1 <> m2)
+          MkDespawned -> MkDespawned
+      MkDespawned -> MkDespawned
 
 data EntityCommands = MkEntityCommands
   { entityId :: !EntityId
-  , queue :: SQ.Seq Command
+  , payload :: !CommandVariant
   }
-  deriving Generic
+  deriving (Generic)
 
-type CommandBuilderE es = State EntityCommands
+type CommandBuilderE = State EntityCommands
 
 newtype Commands = MkCommands {unCommands :: SQ.Seq EntityCommands}
   deriving (Generic)
@@ -454,7 +489,7 @@ instance {-# OVERLAPPING #-} Default QueryInfo where
 data SystemState = MkSystemState
   { commands :: !Commands
   }
-  deriving Generic
+  deriving (Generic)
 
 type System es = (State SystemState :> es, Ecs es)
 

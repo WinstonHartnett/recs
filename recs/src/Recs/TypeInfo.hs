@@ -14,10 +14,13 @@
 module Recs.TypeInfo where
 
 import Data.HashMap.Internal qualified as HMS
+import Data.Hashable (Hashable (..))
+import Data.Maybe (fromMaybe)
 import Data.Primitive.PVar (atomicModifyIntPVar, readPVar)
 import Data.Vector qualified as V
 import Effectful
 import Effectful.State.Static.Local (get, modify)
+import GHC.Fingerprint (Fingerprint (Fingerprint))
 import Recs.Types
 import Recs.Utils
 
@@ -35,16 +38,23 @@ reserveTypeId = do
    information to the type registry.
 -}
 identified :: forall c es. (Component c, Ecs es) => Eff es TypeId
-identified = do
+identified = identifiedByFingerprint (snd $ identify @c) . toSomeStorageDict $ mkStorageDict @(Layout c)
+
+identifiedByFingerprint :: Ecs es => Fingerprint -> SomeStorageDict -> Eff es TypeId
+identifiedByFingerprint f@(Fingerprint h _) sd = do
   ecs <- get @World
-  case uncurry HMS.lookup' (identify @c) ecs.typeInfo.types of
+  case HMS.lookup' (tryFrom' h) f ecs.typeInfo.types of
     Just tId -> pure tId
     Nothing -> do
-      let (h, f) = identify @c
       nextTId <- reserveTypeId
       let updateTInfo =
-            let pushStorageDict = (`V.snoc` toSomeStorageDict (mkStorageDict @(Layout c)))
-                pushNewType = HMS.insert' h f nextTId
+            let pushStorageDict = (`V.snoc` sd)
+                pushNewType = HMS.insert' (tryFrom' h) f nextTId
              in over #typeInfo (over #storageDicts pushStorageDict . over #types pushNewType)
       modify @World updateTInfo
       pure nextTId
+
+identifiedByFingerprint' :: Ecs es => Fingerprint -> Eff es (Maybe TypeId)
+identifiedByFingerprint' f@(Fingerprint h _) = do
+  ecs <- get @World
+  pure $ HMS.lookup' (tryFrom' h) f ecs.typeInfo.types

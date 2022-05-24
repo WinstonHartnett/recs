@@ -85,6 +85,7 @@ executable recs-examples
       , ghc-datasize
       , ghc-prim
       , data-vector-growable
+      , containers
     hs-source-dirs:   app
     ghc-options:
       -ddump-simpl
